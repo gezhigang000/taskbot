@@ -10,16 +10,61 @@ Claude Code Remote Access - Relay Server
 
 import asyncio
 import json
+import logging
 import secrets
+import sys
 import time
 from datetime import datetime
 from typing import Dict, Optional, Set
 from dataclasses import dataclass, field
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query, Request, Response, Cookie
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
+import hashlib
+import socket
+
+
+# ============================================================================
+# Admin Configuration
+# ============================================================================
+
+ADMIN_USERNAME = "admin"
+ADMIN_PASSWORD = "taskbot2024"
+ADMIN_SESSIONS = set()  # 存储有效的 session token
+
+
+# ============================================================================
+# Logging Configuration
+# ============================================================================
+
+def setup_logging():
+    """配置日志系统"""
+    # 创建日志格式
+    formatter = logging.Formatter(
+        '[%(asctime)s] %(levelname)s [%(name)s] %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+
+    # 控制台处理器
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(formatter)
+    console_handler.setLevel(logging.DEBUG)
+
+    # 根日志器
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG)
+    root_logger.addHandler(console_handler)
+
+    # 设置第三方库日志级别
+    logging.getLogger("uvicorn").setLevel(logging.INFO)
+    logging.getLogger("uvicorn.access").setLevel(logging.INFO)
+    logging.getLogger("websockets").setLevel(logging.WARNING)
+
+    return logging.getLogger("relay")
+
+logger = setup_logging()
 
 
 # ============================================================================
@@ -86,6 +131,7 @@ class RelayServer:
         self.agents[agent_id] = agent
         self.agent_clients[agent_id] = set()
 
+        logger.info(f"Agent registered: id={agent_id}, name={name}")
         return agent
 
     def get_agent(self, agent_id: str) -> Optional[Agent]:
@@ -95,9 +141,14 @@ class RelayServer:
     def verify_agent(self, agent_id: str, agent_key: str) -> Optional[Agent]:
         """验证代理凭证"""
         agent = self.agents.get(agent_id)
-        if agent and agent.agent_key == agent_key:
-            return agent
-        return None
+        if not agent:
+            logger.warning(f"Agent verification failed: agent_id={agent_id} not found")
+            return None
+        if agent.agent_key != agent_key:
+            logger.warning(f"Agent verification failed: agent_id={agent_id} invalid key")
+            return None
+        logger.debug(f"Agent verified: agent_id={agent_id}")
+        return agent
 
     async def connect_agent(self, agent: Agent, websocket: WebSocket):
         """代理连接"""
@@ -106,7 +157,12 @@ class RelayServer:
         agent.last_heartbeat = datetime.utcnow()
         agent.is_online = True
 
+        logger.info(f"Agent connected: id={agent.agent_id}, name={agent.name}")
+
         # 通知所有等待的客户端
+        client_count = len(self.agent_clients.get(agent.agent_id, []))
+        if client_count > 0:
+            logger.info(f"Notifying {client_count} waiting clients about agent {agent.agent_id}")
         for client_id in self.agent_clients.get(agent.agent_id, []):
             client = self.clients.get(client_id)
             if client and client.websocket:
@@ -119,6 +175,7 @@ class RelayServer:
         """代理断开"""
         agent.websocket = None
         agent.is_online = False
+        logger.info(f"Agent disconnected: id={agent.agent_id}, name={agent.name}")
 
     async def connect_client(self, client_id: str, websocket: WebSocket) -> Client:
         """客户端连接"""
@@ -127,6 +184,7 @@ class RelayServer:
             websocket=websocket,
         )
         self.clients[client_id] = client
+        logger.debug(f"Client created: id={client_id}")
         return client
 
     def disconnect_client(self, client: Client):
@@ -135,15 +193,18 @@ class RelayServer:
             self.agent_clients[client.connected_agent].discard(client.client_id)
         if client.client_id in self.clients:
             del self.clients[client.client_id]
+        logger.info(f"Client disconnected: id={client.client_id}, agent={client.connected_agent}")
 
     async def bind_client_to_agent(self, client: Client, agent_id: str) -> bool:
         """将客户端绑定到代理"""
         agent = self.agents.get(agent_id)
         if not agent:
+            logger.warning(f"Client {client.client_id} tried to bind to non-existent agent {agent_id}")
             return False
 
         client.connected_agent = agent_id
         self.agent_clients[agent_id].add(client.client_id)
+        logger.info(f"Client {client.client_id} bound to agent {agent_id}")
         return True
 
     async def forward_to_agent(self, agent: Agent, message: dict) -> bool:
@@ -209,15 +270,23 @@ app.add_middleware(
 # ============================================================================
 
 @app.post("/api/agents")
-async def create_agent(name: str = "default"):
+async def create_agent(request: Request, name: str = "default"):
     """创建新的代理（在本地机器上运行）"""
-    agent = relay.register_agent(name)
-    return {
-        "agent_id": agent.agent_id,
-        "agent_key": agent.agent_key,
-        "name": agent.name,
-        "message": "Save the agent_key securely! It won't be shown again.",
-    }
+    client_ip = request.client.host if request.client else "unknown"
+    logger.info(f"API: Create agent request from {client_ip}, name={name}")
+
+    try:
+        agent = relay.register_agent(name)
+        logger.info(f"API: Agent created successfully: id={agent.agent_id}")
+        return {
+            "agent_id": agent.agent_id,
+            "agent_key": agent.agent_key,
+            "name": agent.name,
+            "message": "Save the agent_key securely! It won't be shown again.",
+        }
+    except Exception as e:
+        logger.error(f"API: Failed to create agent: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to create agent: {str(e)}")
 
 
 @app.get("/api/agents")
@@ -253,38 +322,49 @@ async def agent_websocket(
     key: str = Query(...),
 ):
     """代理 WebSocket 连接点"""
+    client_ip = websocket.client.host if websocket.client else "unknown"
+    logger.info(f"WS Agent: Connection attempt from {client_ip}, agent_id={agent_id}")
 
     # 验证代理
     agent = relay.verify_agent(agent_id, key)
     if not agent:
+        logger.warning(f"WS Agent: Rejected connection from {client_ip}, invalid credentials for agent_id={agent_id}")
         await websocket.close(code=4001, reason="Invalid agent credentials")
         return
 
     await websocket.accept()
+    logger.info(f"WS Agent: Connection accepted for agent_id={agent_id} from {client_ip}")
     await relay.connect_agent(agent, websocket)
-    print(f"[Agent] {agent_id} connected")
 
     try:
         while True:
             data = await websocket.receive_text()
-            message = json.loads(data)
+            try:
+                message = json.loads(data)
+            except json.JSONDecodeError as e:
+                logger.error(f"WS Agent: Invalid JSON from agent {agent_id}: {e}")
+                continue
 
-            if message["type"] == "heartbeat":
+            msg_type = message.get("type", "unknown")
+            logger.debug(f"WS Agent: Received message type={msg_type} from agent {agent_id}")
+
+            if msg_type == "heartbeat":
                 agent.last_heartbeat = datetime.utcnow()
                 await websocket.send_text(json.dumps({"type": "heartbeat_ack"}))
 
-            elif message["type"] == "output":
+            elif msg_type == "output":
                 # 转发 Claude Code 输出到所有客户端
                 await relay.broadcast_to_clients(agent_id, message)
 
-            elif message["type"] == "error":
+            elif msg_type == "error":
+                logger.warning(f"WS Agent: Error from agent {agent_id}: {message.get('message', 'unknown')}")
                 await relay.broadcast_to_clients(agent_id, message)
 
-            elif message["type"] == "status":
+            elif msg_type == "status":
                 await relay.broadcast_to_clients(agent_id, message)
 
     except WebSocketDisconnect:
-        print(f"[Agent] {agent_id} disconnected")
+        logger.info(f"WS Agent: Disconnected agent_id={agent_id}")
         relay.disconnect_agent(agent)
 
         # 通知客户端代理离线
@@ -292,6 +372,9 @@ async def agent_websocket(
             "type": "agent_offline",
             "agent_id": agent_id,
         })
+    except Exception as e:
+        logger.error(f"WS Agent: Error with agent {agent_id}: {e}", exc_info=True)
+        relay.disconnect_agent(agent)
 
 
 # ============================================================================
@@ -304,10 +387,13 @@ async def client_websocket(
     agent_id: str,
 ):
     """客户端 WebSocket 连接点"""
+    client_ip = websocket.client.host if websocket.client else "unknown"
+    logger.info(f"WS Client: Connection attempt from {client_ip} for agent_id={agent_id}")
 
     # 检查代理是否存在
     agent = relay.get_agent(agent_id)
     if not agent:
+        logger.warning(f"WS Client: Rejected connection from {client_ip}, agent_id={agent_id} not found")
         await websocket.close(code=4004, reason="Agent not found")
         return
 
@@ -318,7 +404,7 @@ async def client_websocket(
     client = await relay.connect_client(client_id, websocket)
     await relay.bind_client_to_agent(client, agent_id)
 
-    print(f"[Client] {client_id} connected to agent {agent_id}")
+    logger.info(f"WS Client: {client_id} connected to agent {agent_id}, agent_online={agent.is_online}")
 
     # 发送连接状态
     await relay.send_to_client(client, {
@@ -331,24 +417,34 @@ async def client_websocket(
     try:
         while True:
             data = await websocket.receive_text()
-            message = json.loads(data)
+            try:
+                message = json.loads(data)
+            except json.JSONDecodeError as e:
+                logger.error(f"WS Client: Invalid JSON from {client_id}: {e}")
+                continue
 
-            if message["type"] == "input":
+            msg_type = message.get("type", "unknown")
+
+            if msg_type == "input":
                 # 转发输入到代理
                 if agent.is_online:
                     message["client_id"] = client_id
                     await relay.forward_to_agent(agent, message)
                 else:
+                    logger.debug(f"WS Client: Input from {client_id} dropped, agent {agent_id} offline")
                     await relay.send_to_client(client, {
                         "type": "error",
                         "message": "Agent is offline",
                     })
 
-            elif message["type"] == "ping":
+            elif msg_type == "ping":
                 await relay.send_to_client(client, {"type": "pong"})
 
     except WebSocketDisconnect:
-        print(f"[Client] {client_id} disconnected")
+        logger.info(f"WS Client: {client_id} disconnected from agent {agent_id}")
+        relay.disconnect_client(client)
+    except Exception as e:
+        logger.error(f"WS Client: Error with client {client_id}: {e}", exc_info=True)
         relay.disconnect_client(client)
 
 
@@ -715,6 +811,441 @@ async def health():
         "agents_online": sum(1 for a in relay.agents.values() if a.is_online),
         "clients_connected": len(relay.clients),
     }
+
+
+# ============================================================================
+# Admin Dashboard
+# ============================================================================
+
+def verify_admin_session(session_token: str) -> bool:
+    """验证管理员会话"""
+    return session_token in ADMIN_SESSIONS
+
+
+def get_server_info() -> dict:
+    """获取服务器信息"""
+    hostname = socket.gethostname()
+    try:
+        local_ip = socket.gethostbyname(hostname)
+    except:
+        local_ip = "127.0.0.1"
+
+    return {
+        "hostname": hostname,
+        "local_ip": local_ip,
+        "port": 8080,
+        "python_version": sys.version.split()[0],
+    }
+
+
+@app.get("/admin")
+async def admin_page(session: str = Cookie(default=None)):
+    """管理后台"""
+    if not session or not verify_admin_session(session):
+        return RedirectResponse(url="/admin/login", status_code=302)
+
+    server_info = get_server_info()
+    agents_list = relay.list_agents()
+    uptime = datetime.utcnow().isoformat()
+
+    return HTMLResponse(content=f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>管理后台 - Claude Code Relay</title>
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: linear-gradient(135deg, #FDF5E6 0%, #F5DEB3 100%);
+            min-height: 100vh;
+            color: #4A4A4A;
+        }}
+        .header {{
+            background: linear-gradient(135deg, #D2691E 0%, #CD853F 100%);
+            color: white;
+            padding: 20px 40px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }}
+        .header h1 {{ font-size: 24px; font-weight: 600; }}
+        .header-content {{
+            max-width: 1200px;
+            margin: 0 auto;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }}
+        .logout-btn {{
+            background: rgba(255,255,255,0.2);
+            border: 1px solid rgba(255,255,255,0.3);
+            color: white;
+            padding: 8px 20px;
+            border-radius: 20px;
+            cursor: pointer;
+            font-size: 14px;
+            text-decoration: none;
+        }}
+        .logout-btn:hover {{ background: rgba(255,255,255,0.3); }}
+        .container {{
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 30px 40px;
+        }}
+        .stats {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }}
+        .stat-card {{
+            background: white;
+            border-radius: 12px;
+            padding: 24px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            border-left: 4px solid #D2691E;
+        }}
+        .stat-card h3 {{
+            color: #8B7355;
+            font-size: 13px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 8px;
+        }}
+        .stat-card .value {{
+            font-size: 32px;
+            font-weight: 700;
+            color: #D2691E;
+        }}
+        .stat-card .sub {{ color: #aaa; font-size: 12px; margin-top: 4px; }}
+        .card {{
+            background: white;
+            border-radius: 12px;
+            padding: 24px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+        }}
+        .card h2 {{
+            color: #D2691E;
+            font-size: 18px;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #F5DEB3;
+        }}
+        table {{
+            width: 100%;
+            border-collapse: collapse;
+        }}
+        th, td {{
+            text-align: left;
+            padding: 12px 16px;
+            border-bottom: 1px solid #F5DEB3;
+        }}
+        th {{
+            background: #FFFAF0;
+            color: #8B7355;
+            font-weight: 600;
+            font-size: 13px;
+            text-transform: uppercase;
+        }}
+        tr:hover {{ background: #FFFAF0; }}
+        .status-badge {{
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+        }}
+        .status-online {{
+            background: #d4edda;
+            color: #155724;
+        }}
+        .status-offline {{
+            background: #f8d7da;
+            color: #721c24;
+        }}
+        .info-grid {{
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 16px;
+        }}
+        .info-item {{
+            display: flex;
+            justify-content: space-between;
+            padding: 12px;
+            background: #FFFAF0;
+            border-radius: 8px;
+        }}
+        .info-label {{ color: #8B7355; }}
+        .info-value {{ font-weight: 600; color: #4A4A4A; }}
+        .terminal-link {{
+            color: #D2691E;
+            text-decoration: none;
+        }}
+        .terminal-link:hover {{ text-decoration: underline; }}
+        .refresh-btn {{
+            background: #D2691E;
+            color: white;
+            border: none;
+            padding: 10px 24px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+        }}
+        .refresh-btn:hover {{ background: #CD853F; }}
+        .empty-state {{
+            text-align: center;
+            padding: 40px;
+            color: #8B7355;
+        }}
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="header-content">
+            <h1>Claude Code Relay 管理后台</h1>
+            <a href="/admin/logout" class="logout-btn">退出登录</a>
+        </div>
+    </div>
+
+    <div class="container">
+        <div class="stats">
+            <div class="stat-card">
+                <h3>注册代理</h3>
+                <div class="value">{len(relay.agents)}</div>
+                <div class="sub">Total Agents</div>
+            </div>
+            <div class="stat-card">
+                <h3>在线代理</h3>
+                <div class="value">{sum(1 for a in relay.agents.values() if a.is_online)}</div>
+                <div class="sub">Online Now</div>
+            </div>
+            <div class="stat-card">
+                <h3>连接客户端</h3>
+                <div class="value">{len(relay.clients)}</div>
+                <div class="sub">Active Connections</div>
+            </div>
+            <div class="stat-card">
+                <h3>服务状态</h3>
+                <div class="value" style="color: #6B8E23;">正常</div>
+                <div class="sub">Healthy</div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>服务器信息</h2>
+            <div class="info-grid">
+                <div class="info-item">
+                    <span class="info-label">主机名</span>
+                    <span class="info-value">{server_info['hostname']}</span>
+                </div>
+                <div class="info-item">
+                    <span class="info-label">IP 地址</span>
+                    <span class="info-value">{server_info['local_ip']}</span>
+                </div>
+                <div class="info-item">
+                    <span class="info-label">监听端口</span>
+                    <span class="info-value">{server_info['port']}</span>
+                </div>
+                <div class="info-item">
+                    <span class="info-label">Python 版本</span>
+                    <span class="info-value">{server_info['python_version']}</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>已注册代理 <button class="refresh-btn" onclick="location.reload()">刷新</button></h2>
+            {"<table><thead><tr><th>名称</th><th>Agent ID</th><th>状态</th><th>客户端数</th><th>连接时间</th><th>操作</th></tr></thead><tbody>" +
+            "".join([f'''
+                <tr>
+                    <td><strong>{a['name']}</strong></td>
+                    <td><code>{a['agent_id']}</code></td>
+                    <td><span class="status-badge {'status-online' if a['is_online'] else 'status-offline'}">{'在线' if a['is_online'] else '离线'}</span></td>
+                    <td>{a['client_count']}</td>
+                    <td>{a['connected_at'][:19] if a['connected_at'] else '-'}</td>
+                    <td><a href="/terminal/{a['agent_id']}" class="terminal-link" target="_blank">打开终端</a></td>
+                </tr>
+            ''' for a in agents_list]) +
+            "</tbody></table>" if agents_list else '<div class="empty-state">暂无注册代理</div>'}
+        </div>
+    </div>
+
+    <script>
+        // 每 10 秒自动刷新数据
+        setTimeout(() => location.reload(), 30000);
+    </script>
+</body>
+</html>
+    """)
+
+
+@app.get("/admin/login")
+async def admin_login_page(error: str = None):
+    """登录页面"""
+    error_msg = '<p class="error">用户名或密码错误</p>' if error else ''
+
+    return HTMLResponse(content=f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>登录 - Claude Code Relay</title>
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: linear-gradient(135deg, #FDF5E6 0%, #F5DEB3 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }}
+        .login-box {{
+            background: white;
+            border-radius: 16px;
+            padding: 40px;
+            width: 100%;
+            max-width: 400px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+        }}
+        .logo {{
+            text-align: center;
+            margin-bottom: 30px;
+        }}
+        .logo h1 {{
+            color: #D2691E;
+            font-size: 24px;
+            margin-bottom: 8px;
+        }}
+        .logo p {{
+            color: #8B7355;
+            font-size: 14px;
+        }}
+        .form-group {{
+            margin-bottom: 20px;
+        }}
+        label {{
+            display: block;
+            color: #8B7355;
+            font-size: 13px;
+            font-weight: 600;
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }}
+        input {{
+            width: 100%;
+            padding: 14px 16px;
+            border: 2px solid #F5DEB3;
+            border-radius: 8px;
+            font-size: 16px;
+            transition: border-color 0.3s;
+            background: #FFFAF0;
+        }}
+        input:focus {{
+            outline: none;
+            border-color: #D2691E;
+            background: white;
+        }}
+        button {{
+            width: 100%;
+            padding: 14px;
+            background: linear-gradient(135deg, #D2691E 0%, #CD853F 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }}
+        button:hover {{
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(210, 105, 30, 0.4);
+        }}
+        .error {{
+            background: #f8d7da;
+            color: #721c24;
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            text-align: center;
+            font-size: 14px;
+        }}
+        .footer {{
+            text-align: center;
+            margin-top: 20px;
+            color: #aaa;
+            font-size: 12px;
+        }}
+    </style>
+</head>
+<body>
+    <div class="login-box">
+        <div class="logo">
+            <h1>Claude Code Relay</h1>
+            <p>管理后台登录</p>
+        </div>
+
+        {error_msg}
+
+        <form action="/admin/login" method="post">
+            <div class="form-group">
+                <label>用户名</label>
+                <input type="text" name="username" required autofocus placeholder="请输入用户名">
+            </div>
+            <div class="form-group">
+                <label>密码</label>
+                <input type="password" name="password" required placeholder="请输入密码">
+            </div>
+            <button type="submit">登 录</button>
+        </form>
+
+        <div class="footer">
+            Claude Code Remote Access System
+        </div>
+    </div>
+</body>
+</html>
+    """)
+
+
+@app.post("/admin/login")
+async def admin_login_submit(request: Request):
+    """处理登录"""
+    form = await request.form()
+    username = form.get("username", "")
+    password = form.get("password", "")
+
+    logger.info(f"Admin login attempt: username={username}")
+
+    if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
+        # 生成 session token
+        session_token = secrets.token_urlsafe(32)
+        ADMIN_SESSIONS.add(session_token)
+        logger.info(f"Admin login successful: username={username}")
+
+        response = RedirectResponse(url="/admin", status_code=302)
+        response.set_cookie(key="session", value=session_token, httponly=True, max_age=86400)
+        return response
+    else:
+        logger.warning(f"Admin login failed: username={username}")
+        return RedirectResponse(url="/admin/login?error=1", status_code=302)
+
+
+@app.get("/admin/logout")
+async def admin_logout(session: str = Cookie(default=None)):
+    """退出登录"""
+    if session and session in ADMIN_SESSIONS:
+        ADMIN_SESSIONS.discard(session)
+        logger.info("Admin logged out")
+
+    response = RedirectResponse(url="/admin/login", status_code=302)
+    response.delete_cookie(key="session")
+    return response
 
 
 # ============================================================================

@@ -19,6 +19,8 @@ Mobile/Browser  <-->  Relay Server (Public IP)  <-->  Your Computer (Claude Code
 - **Auto Reconnection** - Handles network interruptions gracefully
 - **Mobile Optimized** - Touch-friendly terminal with virtual keys
 - **Secure Relay** - Agent key authentication
+- **GUI Client** - Graphical interface for managing multiple agents
+- **Debug Logging** - Comprehensive logs for troubleshooting
 
 ### Architecture
 
@@ -69,6 +71,8 @@ Scan the QR code shown in terminal, or visit the URL directly.
 
 ### Usage
 
+#### Command Line Agent
+
 ```bash
 # Basic usage
 ./start-agent.sh -s http://relay.example.com:8080
@@ -78,7 +82,23 @@ Scan the QR code shown in terminal, or visit the URL directly.
 
 # Custom workspace directory
 ./start-agent.sh -s http://relay.example.com:8080 -w ~/projects
+
+# Enable debug logging
+./start-agent.sh -s http://relay.example.com:8080 -d
 ```
+
+#### GUI Client (Multi-Instance Support)
+
+```bash
+./start-gui.sh
+```
+
+The GUI client allows you to:
+- Configure server address visually
+- Create and manage multiple agent instances
+- Start/stop agents individually
+- Copy access URLs with one click
+- View real-time logs
 
 ### API Reference
 
@@ -156,6 +176,8 @@ A: Run `pip install qrcode` to install the QR code library.
 - **自动重连** - 优雅处理网络中断
 - **移动端优化** - 触控友好的终端界面，带虚拟按键
 - **安全中继** - Agent 密钥认证
+- **图形客户端** - 支持管理多个代理实例
+- **调试日志** - 完善的日志记录便于排查问题
 
 ### 架构
 
@@ -206,6 +228,8 @@ bash install.sh
 
 ### 使用方法
 
+#### 命令行代理
+
 ```bash
 # 基本用法
 ./start-agent.sh -s http://relay.example.com:8080
@@ -215,7 +239,23 @@ bash install.sh
 
 # 自定义工作目录
 ./start-agent.sh -s http://relay.example.com:8080 -w ~/projects
+
+# 启用调试日志
+./start-agent.sh -s http://relay.example.com:8080 -d
 ```
+
+#### 图形客户端（支持多实例）
+
+```bash
+./start-gui.sh
+```
+
+图形客户端功能：
+- 可视化配置服务器地址
+- 创建和管理多个代理实例
+- 单独启动/停止代理
+- 一键复制访问地址
+- 实时查看日志
 
 ### API 接口
 
@@ -265,6 +305,37 @@ docker run -p 8080:8080 claude-code-remote
 - 本地电脑需安装 Claude Code CLI
 - 中继服务器需要公网 IP
 
+### GUI 客户端依赖
+
+GUI 客户端需要 Tkinter（Python 内置 GUI 库）：
+
+```bash
+# macOS
+brew install python-tk
+
+# Ubuntu/Debian
+sudo apt install python3-tk
+
+# Windows - 通常已包含在 Python 安装中
+```
+
+### 打包独立应用
+
+生成不需要 Python 环境的独立应用程序：
+
+```bash
+# 安装打包工具
+pip install pyinstaller
+
+# 打包 (自动检测当前平台)
+python build.py
+
+# 输出位置
+# macOS: dist/Claude Code Remote.app
+# Windows: dist/Claude Code Remote.exe
+# Linux: dist/claude-code-remote
+```
+
 ### 常见问题
 
 **Q: 手机显示 "Agent offline"？**
@@ -285,11 +356,14 @@ claude-code-remote/
 ├── relay/
 │   └── server.py      # Relay server (FastAPI + WebSocket)
 ├── agent/
-│   └── agent.py       # Local agent (PTY + WebSocket client)
+│   ├── agent.py       # Command-line agent (PTY + WebSocket)
+│   └── gui.py         # GUI client (Tkinter)
 ├── install.sh         # One-click installation
 ├── start-relay.sh     # Start relay server
-├── start-agent.sh     # Start local agent
+├── start-agent.sh     # Start command-line agent
+├── start-gui.sh       # Start GUI client
 ├── requirements.txt   # Python dependencies
+├── ARCHITECTURE.md    # System architecture docs
 └── README.md          # This file
 ```
 

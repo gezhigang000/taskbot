@@ -10,13 +10,16 @@ Claude Code Remote - 本地代理
 import argparse
 import asyncio
 import json
+import logging
 import os
 import pty
 import select
 import signal
 import sys
+import traceback
 import urllib.request
 import urllib.parse
+from datetime import datetime
 from typing import Optional
 
 try:
@@ -25,6 +28,32 @@ except ImportError:
     print("正在安装 websockets...")
     os.system(f"{sys.executable} -m pip install -q websockets")
     import websockets
+
+
+# ============================================================================
+# Logging Configuration
+# ============================================================================
+
+def setup_logging(debug: bool = False):
+    """配置日志系统"""
+    level = logging.DEBUG if debug else logging.INFO
+
+    formatter = logging.Formatter(
+        '[%(asctime)s] %(levelname)s %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(formatter)
+    console_handler.setLevel(level)
+
+    logger = logging.getLogger("agent")
+    logger.setLevel(level)
+    logger.addHandler(console_handler)
+
+    return logger
+
+logger = logging.getLogger("agent")
 
 
 # ============================================================================
@@ -168,20 +197,45 @@ class LocalAgent:
 
     def register(self) -> bool:
         """向中继服务器注册"""
-        print(f"\n[Agent] 正在注册到 {self.server_url}...")
+        logger.info(f"正在注册到 {self.server_url}...")
+
+        url = f"{self.server_url}/api/agents?name={urllib.parse.quote(self.name)}"
+        logger.debug(f"注册请求 URL: {url}")
 
         try:
-            url = f"{self.server_url}/api/agents?name={urllib.parse.quote(self.name)}"
             req = urllib.request.Request(url, method='POST')
+            req.add_header('Content-Type', 'application/json')
+
+            logger.debug("发送注册请求...")
             with urllib.request.urlopen(req, timeout=10) as resp:
-                data = json.loads(resp.read().decode())
+                status_code = resp.getcode()
+                response_body = resp.read().decode()
+                logger.debug(f"响应状态码: {status_code}")
+                logger.debug(f"响应内容: {response_body}")
+
+                data = json.loads(response_body)
                 self.agent_id = data['agent_id']
                 self.agent_key = data['agent_key']
-                print(f"[Agent] 注册成功!")
-                print(f"        Agent ID: {self.agent_id}")
+                logger.info(f"注册成功! Agent ID: {self.agent_id}")
                 return True
+
+        except urllib.error.HTTPError as e:
+            logger.error(f"注册失败 - HTTP错误: {e.code} {e.reason}")
+            try:
+                error_body = e.read().decode()
+                logger.error(f"错误响应: {error_body}")
+            except:
+                pass
+            return False
+        except urllib.error.URLError as e:
+            logger.error(f"注册失败 - 网络错误: {e.reason}")
+            return False
+        except json.JSONDecodeError as e:
+            logger.error(f"注册失败 - JSON解析错误: {e}")
+            return False
         except Exception as e:
-            print(f"[Agent] 注册失败: {e}")
+            logger.error(f"注册失败 - 未知错误: {e}")
+            logger.debug(traceback.format_exc())
             return False
 
     def show_access_info(self):
@@ -209,12 +263,22 @@ class LocalAgent:
         ws_url = self.server_url.replace('http://', 'ws://').replace('https://', 'wss://')
         url = f"{ws_url}/ws/agent/{self.agent_id}?key={self.agent_key}"
 
+        logger.debug(f"WebSocket连接 URL: {ws_url}/ws/agent/{self.agent_id}?key=***")
+
         try:
+            logger.info("正在连接到中继服务器...")
             self.ws = await websockets.connect(url)
-            print("[Agent] 已连接到中继服务器")
+            logger.info("已连接到中继服务器")
             return True
+        except websockets.exceptions.InvalidStatusCode as e:
+            logger.error(f"连接失败 - 服务器拒绝: 状态码 {e.status_code}")
+            return False
+        except ConnectionRefusedError:
+            logger.error("连接失败 - 服务器拒绝连接")
+            return False
         except Exception as e:
-            print(f"[Agent] 连接失败: {e}")
+            logger.error(f"连接失败: {type(e).__name__}: {e}")
+            logger.debug(traceback.format_exc())
             return False
 
     async def start_claude(self):
@@ -229,7 +293,7 @@ class LocalAgent:
 
         while self.running:
             if not await self.connect():
-                print(f"[Agent] {reconnect_delay}秒后重连...")
+                logger.warning(f"{reconnect_delay}秒后重连...")
                 await asyncio.sleep(reconnect_delay)
                 reconnect_delay = min(reconnect_delay * 2, 60)
                 continue
@@ -240,16 +304,24 @@ class LocalAgent:
                 await self.start_claude()
 
             # 启动任务
+            logger.debug("启动输出/心跳/接收循环...")
             tasks = [
-                asyncio.create_task(self._output_loop()),
-                asyncio.create_task(self._heartbeat_loop()),
-                asyncio.create_task(self._receive_loop()),
+                asyncio.create_task(self._output_loop(), name="output"),
+                asyncio.create_task(self._heartbeat_loop(), name="heartbeat"),
+                asyncio.create_task(self._receive_loop(), name="receive"),
             ]
 
             try:
                 done, pending = await asyncio.wait(
                     tasks, return_when=asyncio.FIRST_COMPLETED
                 )
+                # 记录哪个任务先完成
+                for t in done:
+                    if t.exception():
+                        logger.error(f"任务 {t.get_name()} 异常退出: {t.exception()}")
+                    else:
+                        logger.debug(f"任务 {t.get_name()} 正常退出")
+
                 for t in pending:
                     t.cancel()
                     try:
@@ -257,9 +329,10 @@ class LocalAgent:
                     except asyncio.CancelledError:
                         pass
             except Exception as e:
-                print(f"[Agent] 错误: {e}")
+                logger.error(f"主循环错误: {e}")
+                logger.debug(traceback.format_exc())
 
-            print(f"[Agent] 连接断开，{reconnect_delay}秒后重连...")
+            logger.warning(f"连接断开，{reconnect_delay}秒后重连...")
             await asyncio.sleep(reconnect_delay)
 
     async def _output_loop(self):
@@ -335,8 +408,19 @@ async def main():
         default=os.getcwd(),
         help='工作目录 (默认: 当前目录)'
     )
+    parser.add_argument(
+        '--debug', '-d',
+        action='store_true',
+        help='启用调试日志'
+    )
 
     args = parser.parse_args()
+
+    # 初始化日志
+    global logger
+    logger = setup_logging(debug=args.debug)
+    if args.debug:
+        logger.debug("调试模式已启用")
 
     print("""
 ╔══════════════════════════════════════════════════════════════╗

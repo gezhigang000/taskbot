@@ -7,3 +7,6 @@ websockets>=12.0
 
 # QR Code Display / 二维码显示
 qrcode>=7.4
+
+# Build Tools (optional) / 打包工具（可选）
+# pyinstaller>=6.0
