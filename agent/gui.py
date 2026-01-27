@@ -269,10 +269,22 @@ class AgentManager:
         ws_url = instance.server_url.replace('http://', 'ws://').replace('https://', 'wss://')
         url = f"{ws_url}/ws/agent/{instance.agent_id}?key={instance.agent_key}"
 
+        self.log(f"正在连接 WebSocket: {ws_url}/ws/agent/...")
+
         try:
-            instance.websocket = await websockets.connect(url)
+            instance.websocket = await websockets.connect(
+                url,
+                ping_interval=30,
+                ping_timeout=10,
+                close_timeout=5
+            )
             instance.status = "online"
             self.log(f"代理 {instance.name} 已连接到中继服务器")
+            self.log(f"")
+            self.log(f"{'='*50}")
+            self.log(f"手机访问地址: {instance.terminal_url}")
+            self.log(f"{'='*50}")
+            self.log(f"")
 
             # 启动转发任务
             await asyncio.gather(
@@ -281,9 +293,41 @@ class AgentManager:
                 self._heartbeat_loop(instance),
             )
 
-        except Exception as e:
-            self.log(f"连接失败: {e}", "ERROR")
+        except websockets.exceptions.InvalidStatusCode as e:
+            self.log(f"WebSocket 连接被拒绝: HTTP {e.status_code}", "ERROR")
+            if e.status_code == 403:
+                self.log("服务器可能被防火墙阻止或需要认证", "ERROR")
             instance.status = "error"
+        except websockets.exceptions.ConnectionClosedError as e:
+            if e.code == 4001:
+                self.log("代理凭证无效，服务器可能已重启", "ERROR")
+                self.log("请删除此代理并重新创建", "ERROR")
+            else:
+                self.log(f"WebSocket 连接关闭: code={e.code}, reason={e.reason}", "ERROR")
+            instance.status = "error"
+        except websockets.exceptions.InvalidURI as e:
+            self.log(f"WebSocket 地址无效: {url}", "ERROR")
+            instance.status = "error"
+        except ConnectionRefusedError:
+            self.log(f"WebSocket 连接被拒绝，服务器可能未启动", "ERROR")
+            instance.status = "error"
+        except asyncio.TimeoutError:
+            self.log(f"WebSocket 连接超时", "ERROR")
+            instance.status = "error"
+        except OSError as e:
+            self.log(f"网络错误: {e}", "ERROR")
+            instance.status = "error"
+        except Exception as e:
+            self.log(f"连接失败: {type(e).__name__}: {e}", "ERROR")
+            instance.status = "error"
+        finally:
+            # 清理 Claude 进程
+            if instance.process and instance.process.returncode is None:
+                try:
+                    instance.process.terminate()
+                    self.log("Claude 进程已终止")
+                except:
+                    pass
 
     async def _output_loop(self, instance: AgentInstance):
         """转发输出"""
