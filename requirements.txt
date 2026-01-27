@@ -1,0 +1,9 @@
+# Relay Server Dependencies / 中继服务器依赖
+fastapi>=0.100.0
+uvicorn>=0.23.0
+
+# Agent Dependencies / 代理依赖
+websockets>=12.0
+
+# QR Code Display / 二维码显示
+qrcode>=7.4
