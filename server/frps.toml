@@ -1,0 +1,20 @@
+# FRP 服务端配置 - 部署到公网服务器
+# 安装: https://github.com/fatedier/frp/releases
+
+bindPort = 7000
+vhostHTTPPort = 8080
+
+# 认证
+auth.method = "token"
+auth.token = "your-secret-token-change-me"
+
+# 管理面板
+webServer.addr = "127.0.0.1"
+webServer.port = 7500
+webServer.user = "admin"
+webServer.password = "admin123"
+
+# 日志
+log.to = "/var/log/frps.log"
+log.level = "info"
+log.maxDays = 7

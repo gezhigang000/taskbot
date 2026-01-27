@@ -14,16 +14,14 @@ import platform
 import subprocess
 import shutil
 
-# 应用信息
 APP_NAME = "Claude Code Remote"
 APP_NAME_SHORT = "ClaudeCodeRemote"
-APP_VERSION = "1.0.0"
+APP_VERSION = "2.0.0"
 APP_ID = "com.claudecode.remote"
 MAIN_SCRIPT = "agent/gui.py"
 
 
 def get_platform():
-    """获取当前平台"""
     system = platform.system().lower()
     if system == "darwin":
         return "mac"
@@ -35,7 +33,6 @@ def get_platform():
 
 
 def clean_build():
-    """清理构建目录"""
     for path in ["build", "dist", f"{APP_NAME_SHORT}.spec"]:
         if os.path.exists(path):
             if os.path.isdir(path):
@@ -46,18 +43,16 @@ def clean_build():
 
 
 def build_mac(onefile=False):
-    """构建 macOS 应用"""
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("构建 macOS 应用")
-    print("="*60)
+    print("=" * 60)
 
     cmd = [
         sys.executable, "-m", "PyInstaller",
         "--name", APP_NAME_SHORT,
-        "--windowed",  # 创建 .app bundle
+        "--windowed",
         "--clean",
         "--noconfirm",
-        # macOS 特定
         "--osx-bundle-identifier", APP_ID,
     ]
 
@@ -66,11 +61,13 @@ def build_mac(onefile=False):
     else:
         cmd.append("--onedir")
 
-    # 隐藏导入 - 确保所有依赖都被打包
+    # 数据文件
     cmd.extend([
-        "--hidden-import", "websockets",
-        "--hidden-import", "websockets.legacy",
-        "--hidden-import", "websockets.legacy.client",
+        "--add-data", "agent/terminal.html:agent",
+    ])
+
+    # 隐藏导入
+    cmd.extend([
         "--hidden-import", "asyncio",
         "--hidden-import", "tkinter",
         "--hidden-import", "tkinter.ttk",
@@ -81,13 +78,20 @@ def build_mac(onefile=False):
         "--hidden-import", "urllib.request",
         "--hidden-import", "urllib.parse",
         "--hidden-import", "threading",
-        "--hidden-import", "dataclasses",
         "--hidden-import", "pathlib",
+        "--hidden-import", "subprocess",
+        "--hidden-import", "signal",
+        "--hidden-import", "pty",
+        "--hidden-import", "select",
+        "--hidden-import", "fcntl",
+        "--hidden-import", "termios",
+        "--hidden-import", "struct",
     ])
 
-    # 收集所有 websockets 子模块
+    # FastAPI + uvicorn
     cmd.extend([
-        "--collect-submodules", "websockets",
+        "--collect-submodules", "uvicorn",
+        "--collect-submodules", "fastapi",
     ])
 
     cmd.append(MAIN_SCRIPT)
@@ -96,7 +100,6 @@ def build_mac(onefile=False):
     result = subprocess.run(cmd)
 
     if result.returncode == 0:
-        # 重命名为带空格的名称
         if os.path.exists(f"dist/{APP_NAME_SHORT}.app"):
             target = f"dist/{APP_NAME}.app"
             if os.path.exists(target):
@@ -104,21 +107,6 @@ def build_mac(onefile=False):
             shutil.move(f"dist/{APP_NAME_SHORT}.app", target)
             print(f"\n✓ 应用已生成: dist/{APP_NAME}.app")
             print(f"  可以直接拖拽到 Applications 文件夹使用")
-
-            # 创建 DMG (如果有 create-dmg)
-            if shutil.which("create-dmg"):
-                print("\n正在创建 DMG 安装包...")
-                dmg_cmd = [
-                    "create-dmg",
-                    "--volname", APP_NAME,
-                    "--window-size", "500", "300",
-                    "--icon-size", "100",
-                    "--app-drop-link", "350", "150",
-                    "--icon", f"{APP_NAME}.app", "150", "150",
-                    f"dist/{APP_NAME}-{APP_VERSION}.dmg",
-                    f"dist/{APP_NAME}.app"
-                ]
-                subprocess.run(dmg_cmd)
     else:
         print("\n✗ 构建失败")
         return False
@@ -127,10 +115,9 @@ def build_mac(onefile=False):
 
 
 def build_windows(onefile=True):
-    """构建 Windows 应用"""
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("构建 Windows 应用")
-    print("="*60)
+    print("=" * 60)
 
     cmd = [
         sys.executable, "-m", "PyInstaller",
@@ -145,14 +132,12 @@ def build_windows(onefile=True):
     else:
         cmd.append("--onedir")
 
-    # 隐藏导入
     cmd.extend([
-        "--hidden-import", "websockets",
-        "--hidden-import", "websockets.legacy",
-        "--hidden-import", "websockets.legacy.client",
+        "--add-data", "agent/terminal.html;agent",
         "--hidden-import", "asyncio",
         "--hidden-import", "tkinter",
-        "--collect-submodules", "websockets",
+        "--collect-submodules", "uvicorn",
+        "--collect-submodules", "fastapi",
     ])
 
     cmd.append(MAIN_SCRIPT)
@@ -162,7 +147,6 @@ def build_windows(onefile=True):
 
     if result.returncode == 0:
         if onefile:
-            # 重命名
             src = f"dist/{APP_NAME_SHORT}.exe"
             dst = f"dist/{APP_NAME}.exe"
             if os.path.exists(src):
@@ -180,10 +164,9 @@ def build_windows(onefile=True):
 
 
 def build_linux(onefile=True):
-    """构建 Linux 应用"""
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("构建 Linux 应用")
-    print("="*60)
+    print("=" * 60)
 
     cmd = [
         sys.executable, "-m", "PyInstaller",
@@ -197,14 +180,12 @@ def build_linux(onefile=True):
     else:
         cmd.append("--onedir")
 
-    # 隐藏导入
     cmd.extend([
-        "--hidden-import", "websockets",
-        "--hidden-import", "websockets.legacy",
-        "--hidden-import", "websockets.legacy.client",
+        "--add-data", "agent/terminal.html:agent",
         "--hidden-import", "asyncio",
         "--hidden-import", "tkinter",
-        "--collect-submodules", "websockets",
+        "--collect-submodules", "uvicorn",
+        "--collect-submodules", "fastapi",
     ])
 
     cmd.append(MAIN_SCRIPT)
@@ -232,7 +213,6 @@ def main():
                         help="仅清理构建目录")
     args = parser.parse_args()
 
-    # 切换到项目根目录
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
     print(f"""
@@ -250,28 +230,24 @@ Python: {sys.version.split()[0]}
         clean_build()
         return
 
-    # 确定目标平台
     target = args.platform if args.platform != "auto" else get_platform()
-
-    # 清理旧构建
     clean_build()
 
-    # 构建
     success = False
     if target == "mac":
         success = build_mac(onefile=args.onefile)
     elif target == "win":
-        success = build_windows(onefile=True)  # Windows 默认单文件
+        success = build_windows(onefile=True)
     elif target == "linux":
-        success = build_linux(onefile=True)  # Linux 默认单文件
+        success = build_linux(onefile=True)
     else:
         print(f"不支持的平台: {target}")
         sys.exit(1)
 
     if success:
-        print("\n" + "="*60)
+        print("\n" + "=" * 60)
         print("构建完成!")
-        print("="*60)
+        print("=" * 60)
         print(f"\n输出目录: {os.path.abspath('dist')}")
         print("\n用户无需安装任何依赖，直接运行即可使用。")
 

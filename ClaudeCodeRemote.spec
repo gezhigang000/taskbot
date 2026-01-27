@@ -1,15 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_submodules
 
-hiddenimports = ['websockets', 'websockets.legacy', 'websockets.legacy.client', 'asyncio', 'tkinter', 'tkinter.ttk', 'tkinter.scrolledtext', 'tkinter.filedialog', 'tkinter.messagebox', 'json', 'urllib.request', 'urllib.parse', 'threading', 'dataclasses', 'pathlib']
-hiddenimports += collect_submodules('websockets')
+hiddenimports = ['asyncio', 'tkinter', 'tkinter.ttk', 'tkinter.scrolledtext', 'tkinter.filedialog', 'tkinter.messagebox', 'json', 'urllib.request', 'urllib.parse', 'threading', 'pathlib', 'subprocess', 'signal', 'pty', 'select', 'fcntl', 'termios', 'struct']
+hiddenimports += collect_submodules('uvicorn')
+hiddenimports += collect_submodules('fastapi')
 
 
 a = Analysis(
     ['agent/gui.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('agent/terminal.html', 'agent')],
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},

@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>Claude Code Remote</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            background: #1a1a2e;
+            color: #eee;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            height: 100vh;
+            height: 100dvh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        /* 顶部状态栏 */
+        .header {
+            display: flex;
+            align-items: center;
+            padding: 8px 12px;
+            background: #16213e;
+            border-bottom: 1px solid #0f3460;
+            flex-shrink: 0;
+        }
+
+        .status-dot {
+            width: 10px; height: 10px;
+            border-radius: 50%;
+            background: #dc3545;
+            margin-right: 8px;
+            flex-shrink: 0;
+        }
+
+        .status-dot.connected { background: #0f9d58; box-shadow: 0 0 6px #0f9d58; }
+
+        .header-title {
+            font-size: 14px;
+            font-weight: 600;
+            flex: 1;
+        }
+
+        .header-info {
+            font-size: 11px;
+            color: #888;
+        }
+
+        /* 终端区域 */
+        .terminal-container {
+            flex: 1;
+            overflow: hidden;
+        }
+
+        #terminal {
+            height: 100%;
+        }
+
+        /* 底部功能键 */
+        .keyboard-bar {
+            display: flex;
+            padding: 6px;
+            background: #16213e;
+            border-top: 1px solid #0f3460;
+            gap: 4px;
+            flex-shrink: 0;
+            overflow-x: auto;
+        }
+
+        .keyboard-bar button {
+            background: #0f3460;
+            color: #ddd;
+            border: 1px solid #1a4a8a;
+            border-radius: 4px;
+            padding: 8px 12px;
+            font-size: 13px;
+            font-family: monospace;
+            cursor: pointer;
+            white-space: nowrap;
+            flex-shrink: 0;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        .keyboard-bar button:active {
+            background: #1a4a8a;
+        }
+
+        .keyboard-bar button.accent {
+            background: #d32f2f;
+            border-color: #e53935;
+        }
+
+        /* 断线重连提示 */
+        .reconnect-overlay {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.7);
+            z-index: 100;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .reconnect-overlay.show {
+            display: flex;
+        }
+
+        .reconnect-box {
+            background: #16213e;
+            border-radius: 8px;
+            padding: 24px;
+            text-align: center;
+        }
+
+        .reconnect-box p { margin-bottom: 12px; }
+
+        .spinner {
+            width: 24px; height: 24px;
+            border: 3px solid #333;
+            border-top-color: #0f9d58;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            margin: 0 auto 12px;
+        }
+
+        @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="status-dot" id="statusDot"></div>
+        <span class="header-title">Claude Code</span>
+        <span class="header-info" id="headerInfo">Connecting...</span>
+    </div>
+
+    <div class="terminal-container">
+        <div id="terminal"></div>
+    </div>
+
+    <div class="keyboard-bar">
+        <button class="accent" onclick="sendKey('\x03')">Ctrl+C</button>
+        <button onclick="sendKey('\x04')">Ctrl+D</button>
+        <button onclick="sendKey('\t')">Tab</button>
+        <button onclick="sendKey('\x1b')">Esc</button>
+        <button onclick="sendKey('\x1b[A')">&#x2191;</button>
+        <button onclick="sendKey('\x1b[B')">&#x2193;</button>
+        <button onclick="sendKey('\x1b[D')">&#x2190;</button>
+        <button onclick="sendKey('\x1b[C')">&#x2192;</button>
+        <button onclick="sendKey('\x1a')">Ctrl+Z</button>
+        <button onclick="sendKey('\x0c')">Ctrl+L</button>
+        <button onclick="sendKey('y\n')">Yes</button>
+    </div>
+
+    <div class="reconnect-overlay" id="reconnectOverlay">
+        <div class="reconnect-box">
+            <div class="spinner"></div>
+            <p>连接已断开</p>
+            <p id="reconnectMsg">正在重连...</p>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.min.js"></script>
+    <script>
+        // === 终端初始化 ===
+        const term = new Terminal({
+            cursorBlink: true,
+            fontSize: 14,
+            fontFamily: "'Menlo', 'Monaco', 'Courier New', monospace",
+            theme: {
+                background: '#1a1a2e',
+                foreground: '#eee',
+                cursor: '#0f9d58',
+                selectionBackground: '#264f78',
+            },
+            scrollback: 10000,
+            convertEol: true,
+        });
+
+        const fitAddon = new FitAddon.FitAddon();
+        const webLinksAddon = new WebLinksAddon.WebLinksAddon();
+        term.loadAddon(fitAddon);
+        term.loadAddon(webLinksAddon);
+        term.open(document.getElementById('terminal'));
+        fitAddon.fit();
+
+        // 获取 token
+        const urlParams = new URLSearchParams(window.location.search);
+        const token = urlParams.get('token') || '';
+
+        // === 输入处理 ===
+        let inputBuffer = '';
+        let sendTimer = null;
+
+        term.onData(data => {
+            // 合并快速输入（粘贴场景）
+            inputBuffer += data;
+            if (!sendTimer) {
+                sendTimer = setTimeout(() => {
+                    sendInput(inputBuffer);
+                    inputBuffer = '';
+                    sendTimer = null;
+                }, 10);
+            }
+        });
+
+        function sendKey(key) {
+            sendInput(key);
+            term.focus();
+        }
+
+        async function sendInput(data) {
+            try {
+                await fetch('/input?token=' + token, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ data }),
+                });
+            } catch (e) {
+                console.error('Input error:', e);
+            }
+        }
+
+        // === SSE 输出 ===
+        let eventSource = null;
+        let reconnectAttempts = 0;
+        const maxReconnect = 30;
+
+        function connectSSE() {
+            if (eventSource) {
+                eventSource.close();
+            }
+
+            eventSource = new EventSource('/sse?token=' + token);
+
+            eventSource.onopen = () => {
+                reconnectAttempts = 0;
+                setStatus(true);
+                hideReconnect();
+            };
+
+            eventSource.onmessage = (event) => {
+                try {
+                    const msg = JSON.parse(event.data);
+                    if (msg.type === 'output' && msg.data) {
+                        term.write(msg.data);
+                    }
+                    // heartbeat 不需要处理
+                } catch (e) {
+                    console.error('Parse error:', e);
+                }
+            };
+
+            eventSource.onerror = () => {
+                eventSource.close();
+                setStatus(false);
+
+                if (reconnectAttempts < maxReconnect) {
+                    reconnectAttempts++;
+                    const delay = Math.min(1000 * reconnectAttempts, 10000);
+                    showReconnect(`正在重连... (${reconnectAttempts}/${maxReconnect})`);
+                    setTimeout(connectSSE, delay);
+                } else {
+                    showReconnect('连接失败，请刷新页面');
+                }
+            };
+        }
+
+        // === UI 辅助 ===
+        function setStatus(connected) {
+            document.getElementById('statusDot').className =
+                'status-dot' + (connected ? ' connected' : '');
+            document.getElementById('headerInfo').textContent =
+                connected ? 'Connected' : 'Disconnected';
+        }
+
+        function showReconnect(msg) {
+            document.getElementById('reconnectOverlay').className = 'reconnect-overlay show';
+            document.getElementById('reconnectMsg').textContent = msg;
+        }
+
+        function hideReconnect() {
+            document.getElementById('reconnectOverlay').className = 'reconnect-overlay';
+        }
+
+        // 终端尺寸调整
+        function reportSize() {
+            fetch('/resize?token=' + token, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ rows: term.rows, cols: term.cols }),
+            }).catch(() => {});
+        }
+
+        window.addEventListener('resize', () => {
+            fitAddon.fit();
+            reportSize();
+        });
+
+        // 启动
+        connectSSE();
+        setTimeout(reportSize, 500);
+        term.focus();
+    </script>
+</body>
+</html>

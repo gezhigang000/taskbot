@@ -1,12 +1,3 @@
-# Relay Server Dependencies / 中继服务器依赖
-fastapi>=0.100.0
-uvicorn>=0.23.0
-
-# Agent Dependencies / 代理依赖
-websockets>=12.0
-
-# QR Code Display / 二维码显示
-qrcode>=7.4
-
-# Build Tools (optional) / 打包工具（可选）
-# pyinstaller>=6.0
+# Claude Code Remote - 依赖
+fastapi>=0.104.0
+uvicorn>=0.24.0
