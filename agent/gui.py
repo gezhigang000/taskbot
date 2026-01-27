@@ -55,12 +55,46 @@ def get_config_file() -> Path:
     return get_config_dir() / "config.json"
 
 
+def find_claude_command() -> Optional[str]:
+    """查找 claude 命令路径"""
+    import shutil
+
+    # 常见安装路径
+    search_paths = [
+        # 用户本地安装
+        Path.home() / ".local" / "bin" / "claude",
+        # npm 全局安装
+        Path.home() / ".npm-global" / "bin" / "claude",
+        # Homebrew (macOS)
+        Path("/usr/local/bin/claude"),
+        Path("/opt/homebrew/bin/claude"),
+        # Linux 系统路径
+        Path("/usr/bin/claude"),
+        # Windows
+        Path.home() / "AppData" / "Roaming" / "npm" / "claude.cmd",
+        Path.home() / "AppData" / "Local" / "Programs" / "claude" / "claude.exe",
+    ]
+
+    # 先检查 PATH
+    claude_in_path = shutil.which("claude")
+    if claude_in_path:
+        return claude_in_path
+
+    # 检查常见路径
+    for path in search_paths:
+        if path.exists() and os.access(path, os.X_OK):
+            return str(path)
+
+    return None
+
+
 @dataclass
 class AppConfig:
     """应用配置"""
     server_url: str = "http://taskbot.com.cn"
     default_name: str = ""
     default_workspace: str = ""
+    claude_path: str = ""  # Claude CLI 路径
     saved_agents: List[Dict] = field(default_factory=list)
 
     def __post_init__(self):
@@ -68,6 +102,8 @@ class AppConfig:
             self.default_name = platform.node()
         if not self.default_workspace:
             self.default_workspace = str(Path.home())
+        if not self.claude_path:
+            self.claude_path = find_claude_command() or ""
 
     @classmethod
     def load(cls) -> "AppConfig":
@@ -178,22 +214,50 @@ class AgentManager:
         self.log(f"启动代理 {instance.name}...")
         instance.status = "connecting"
 
+        # 查找 Claude CLI
+        claude_cmd = self.config.claude_path or find_claude_command()
+        if not claude_cmd:
+            self.log("=" * 50, "ERROR")
+            self.log("错误: 未找到 Claude Code CLI", "ERROR")
+            self.log("", "ERROR")
+            self.log("请先安装 Claude Code CLI:", "ERROR")
+            self.log("  npm install -g @anthropic-ai/claude-code", "ERROR")
+            self.log("", "ERROR")
+            self.log("或在设置中指定 claude 命令路径", "ERROR")
+            self.log("=" * 50, "ERROR")
+            instance.status = "error"
+            return
+
+        self.log(f"使用 Claude CLI: {claude_cmd}")
+
         # 启动 Claude Code 进程
         try:
             os.makedirs(instance.workspace, exist_ok=True)
             instance.master_fd, instance.slave_fd = pty.openpty()
 
+            # 扩展 PATH 以包含常见安装路径
+            env = os.environ.copy()
+            extra_paths = [
+                str(Path.home() / ".local" / "bin"),
+                str(Path.home() / ".npm-global" / "bin"),
+                "/usr/local/bin",
+                "/opt/homebrew/bin",
+            ]
+            env['PATH'] = ':'.join(extra_paths) + ':' + env.get('PATH', '')
+            env['TERM'] = 'xterm-256color'
+
             instance.process = await asyncio.create_subprocess_exec(
-                'claude',
+                claude_cmd,
                 stdin=instance.slave_fd,
                 stdout=instance.slave_fd,
                 stderr=instance.slave_fd,
                 cwd=instance.workspace,
-                env={**os.environ, 'TERM': 'xterm-256color'}
+                env=env
             )
             self.log(f"Claude Code 已启动 (PID: {instance.process.pid})")
         except FileNotFoundError:
-            self.log("错误: 未找到 claude 命令，请确保已安装 Claude Code CLI", "ERROR")
+            self.log(f"错误: 无法执行 {claude_cmd}", "ERROR")
+            self.log("请检查 Claude CLI 是否正确安装", "ERROR")
             instance.status = "error"
             return
         except Exception as e:
@@ -419,7 +483,7 @@ class AgentGUI:
         main_frame = ttk.Frame(self.root, padding="15")
         main_frame.pack(fill=tk.BOTH, expand=True)
 
-        # === 标题区域 ===
+        # === 标题栏 ===
         header_frame = ttk.Frame(main_frame)
         header_frame.pack(fill=tk.X, pady=(0, 15))
 
@@ -430,107 +494,57 @@ class AgentGUI:
                                bg=self.COLORS['bg'])
         title_label.pack(side=tk.LEFT)
 
-        subtitle_label = tk.Label(header_frame,
-                                  text="远程访问您的 Claude Code 终端",
-                                  font=('', 11),
-                                  fg=self.COLORS['text_light'],
-                                  bg=self.COLORS['bg'])
-        subtitle_label.pack(side=tk.LEFT, padx=(15, 0), pady=(8, 0))
+        # 右侧按钮
+        btn_frame = ttk.Frame(header_frame)
+        btn_frame.pack(side=tk.RIGHT)
 
-        # === 服务器配置 ===
-        server_frame = ttk.LabelFrame(main_frame, text=" 服务器设置 ", padding="15")
-        server_frame.pack(fill=tk.X, pady=(0, 12))
+        ttk.Button(btn_frame, text="设置", command=self._show_settings, style='Small.TButton').pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="代理管理", command=self._show_agent_manager, style='Small.TButton').pack(side=tk.LEFT, padx=5)
 
-        ttk.Label(server_frame, text="服务器地址:").grid(row=0, column=0, sticky=tk.W, pady=5)
-        self.server_var = tk.StringVar(value=self.config.server_url)
-        server_entry = ttk.Entry(server_frame, textvariable=self.server_var, width=45, font=('', 11))
-        server_entry.grid(row=0, column=1, sticky=tk.EW, pady=5, padx=(10, 10))
-
-        btn_frame1 = ttk.Frame(server_frame)
-        btn_frame1.grid(row=0, column=2, pady=5)
-        ttk.Button(btn_frame1, text="保存", command=self._save_server_config, style='Small.TButton').pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_frame1, text="测试连接", command=self._test_connection, style='Small.TButton').pack(side=tk.LEFT, padx=2)
-
-        server_frame.columnconfigure(1, weight=1)
-
-        # === 快速连接 ===
+        # === 快速连接区 ===
         quick_frame = ttk.LabelFrame(main_frame, text=" 快速连接 ", padding="15")
         quick_frame.pack(fill=tk.X, pady=(0, 12))
 
-        # 第一行：代理名称
-        row1 = ttk.Frame(quick_frame)
-        row1.pack(fill=tk.X, pady=(0, 8))
-
-        ttk.Label(row1, text="代理名称:").pack(side=tk.LEFT)
+        # 变量初始化
+        self.server_var = tk.StringVar(value=self.config.server_url)
         self.name_var = tk.StringVar(value=self.config.default_name)
-        name_entry = ttk.Entry(row1, textvariable=self.name_var, width=30, font=('', 11))
-        name_entry.pack(side=tk.LEFT, padx=(10, 20))
-
-        ttk.Label(row1, text="工作目录:").pack(side=tk.LEFT)
         self.workspace_var = tk.StringVar(value=self.config.default_workspace)
-        workspace_entry = ttk.Entry(row1, textvariable=self.workspace_var, width=40, font=('', 11))
-        workspace_entry.pack(side=tk.LEFT, padx=(10, 5), fill=tk.X, expand=True)
-        ttk.Button(row1, text="...", width=3, command=self._browse_workspace, style='Small.TButton').pack(side=tk.LEFT)
+        self.claude_path_var = tk.StringVar(value=self.config.claude_path)
 
-        # 第二行：一键连接按钮
-        row2 = ttk.Frame(quick_frame)
-        row2.pack(fill=tk.X, pady=(8, 0))
+        # 一行显示
+        row = ttk.Frame(quick_frame)
+        row.pack(fill=tk.X)
 
-        connect_btn = ttk.Button(row2, text="一键连接", command=self._quick_connect, style='Accent.TButton')
-        connect_btn.pack(side=tk.LEFT)
+        # 一键连接按钮（左侧大按钮）
+        connect_btn = ttk.Button(row, text="一键连接", command=self._quick_connect, style='Accent.TButton')
+        connect_btn.pack(side=tk.LEFT, padx=(0, 15))
 
-        hint_label = tk.Label(row2,
-                              text="点击自动注册并连接到服务器，生成手机访问地址",
+        # 工作目录
+        ttk.Label(row, text="工作目录:").pack(side=tk.LEFT)
+        workspace_entry = ttk.Entry(row, textvariable=self.workspace_var, width=40, font=('', 11))
+        workspace_entry.pack(side=tk.LEFT, padx=(5, 5), fill=tk.X, expand=True)
+        ttk.Button(row, text="...", width=3, command=self._browse_workspace, style='Small.TButton').pack(side=tk.LEFT)
+
+        # 提示文本
+        hint_frame = ttk.Frame(quick_frame)
+        hint_frame.pack(fill=tk.X, pady=(10, 0))
+        hint_label = tk.Label(hint_frame,
+                              text=f"服务器: {self.config.server_url}  |  代理名称: {self.config.default_name}  |  点击「设置」修改配置",
                               font=('', 10),
                               fg=self.COLORS['text_light'],
                               bg=self.COLORS['bg'])
-        hint_label.pack(side=tk.LEFT, padx=(15, 0))
+        hint_label.pack(side=tk.LEFT)
+        self.hint_label = hint_label
 
-        # === 实例列表 ===
-        list_frame = ttk.LabelFrame(main_frame, text=" 已连接的代理 ", padding="15")
-        list_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 12))
-
-        # 表格容器
-        tree_container = ttk.Frame(list_frame)
-        tree_container.pack(fill=tk.BOTH, expand=True)
-
-        # 表格
-        columns = ("name", "status", "agent_id", "url")
-        self.tree = ttk.Treeview(tree_container, columns=columns, show="headings", height=5)
-        self.tree.heading("name", text="名称")
-        self.tree.heading("status", text="状态")
-        self.tree.heading("agent_id", text="Agent ID")
-        self.tree.heading("url", text="访问地址")
-
-        self.tree.column("name", width=120, minwidth=80)
-        self.tree.column("status", width=80, minwidth=60)
-        self.tree.column("agent_id", width=120, minwidth=100)
-        self.tree.column("url", width=350, minwidth=200)
-
-        scrollbar = ttk.Scrollbar(tree_container, orient=tk.VERTICAL, command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scrollbar.set)
-
-        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-
-        # 操作按钮
-        action_frame = ttk.Frame(list_frame)
-        action_frame.pack(fill=tk.X, pady=(12, 0))
-
-        ttk.Button(action_frame, text="启动", command=self._start_selected, style='Small.TButton').pack(side=tk.LEFT, padx=(0, 5))
-        ttk.Button(action_frame, text="停止", command=self._stop_selected, style='Small.TButton').pack(side=tk.LEFT, padx=5)
-        ttk.Button(action_frame, text="复制地址", command=self._copy_url, style='Small.TButton').pack(side=tk.LEFT, padx=5)
-        ttk.Button(action_frame, text="删除", command=self._delete_selected, style='Small.TButton').pack(side=tk.LEFT, padx=5)
-
-        # === 日志区域 ===
+        # === 日志区域（主要区域） ===
         log_frame = ttk.LabelFrame(main_frame, text=" 运行日志 ", padding="15")
         log_frame.pack(fill=tk.BOTH, expand=True)
 
         self.log_text = scrolledtext.ScrolledText(
             log_frame,
-            height=8,
+            height=20,
             state=tk.DISABLED,
-            font=("Menlo", 10),
+            font=("Menlo", 11),
             bg=self.COLORS['bg_light'],
             fg=self.COLORS['text'],
             relief='solid',
@@ -539,11 +553,227 @@ class AgentGUI:
         )
         self.log_text.pack(fill=tk.BOTH, expand=True)
 
+        # 日志底部操作栏
+        log_actions = ttk.Frame(log_frame)
+        log_actions.pack(fill=tk.X, pady=(10, 0))
+        ttk.Button(log_actions, text="清空日志", command=self._clear_log, style='Small.TButton').pack(side=tk.LEFT)
+
         # 配置日志文本标签颜色
         self.log_text.tag_configure('info', foreground=self.COLORS['text'])
         self.log_text.tag_configure('success', foreground=self.COLORS['success'])
         self.log_text.tag_configure('error', foreground=self.COLORS['error'])
-        self.log_text.tag_configure('highlight', foreground=self.COLORS['accent'], font=('Menlo', 10, 'bold'))
+        self.log_text.tag_configure('highlight', foreground=self.COLORS['accent'], font=('Menlo', 11, 'bold'))
+
+        # 初始化隐藏的 tree（用于兼容现有代码）
+        self._init_hidden_tree()
+
+    def _init_hidden_tree(self):
+        """初始化隐藏的代理列表（用于状态管理）"""
+        # 创建隐藏的 Treeview 用于兼容现有代码
+        self._hidden_frame = ttk.Frame(self.root)
+        columns = ("name", "status", "agent_id", "url")
+        self.tree = ttk.Treeview(self._hidden_frame, columns=columns, show="headings", height=1)
+        for col in columns:
+            self.tree.heading(col, text=col)
+
+    def _clear_log(self):
+        """清空日志"""
+        self.log_text.configure(state=tk.NORMAL)
+        self.log_text.delete(1.0, tk.END)
+        self.log_text.configure(state=tk.DISABLED)
+        self.log("日志已清空")
+
+    def _show_settings(self):
+        """显示设置窗口"""
+        settings_win = tk.Toplevel(self.root)
+        settings_win.title("设置")
+        settings_win.geometry("550x400")
+        settings_win.configure(bg=self.COLORS['bg'])
+        settings_win.transient(self.root)
+        settings_win.grab_set()
+
+        frame = ttk.Frame(settings_win, padding="20")
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        # 服务器设置
+        ttk.Label(frame, text="服务器地址:", font=('', 11, 'bold')).grid(row=0, column=0, sticky=tk.W, pady=(0, 5))
+        server_entry = ttk.Entry(frame, textvariable=self.server_var, width=50, font=('', 11))
+        server_entry.grid(row=1, column=0, columnspan=2, sticky=tk.EW, pady=(0, 15))
+
+        # 代理名称
+        ttk.Label(frame, text="默认代理名称:", font=('', 11, 'bold')).grid(row=2, column=0, sticky=tk.W, pady=(0, 5))
+        name_entry = ttk.Entry(frame, textvariable=self.name_var, width=50, font=('', 11))
+        name_entry.grid(row=3, column=0, columnspan=2, sticky=tk.EW, pady=(0, 15))
+
+        # 工作目录
+        ttk.Label(frame, text="默认工作目录:", font=('', 11, 'bold')).grid(row=4, column=0, sticky=tk.W, pady=(0, 5))
+        ws_frame = ttk.Frame(frame)
+        ws_frame.grid(row=5, column=0, columnspan=2, sticky=tk.EW, pady=(0, 15))
+        workspace_entry = ttk.Entry(ws_frame, textvariable=self.workspace_var, width=45, font=('', 11))
+        workspace_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(ws_frame, text="浏览", command=self._browse_workspace, style='Small.TButton').pack(side=tk.LEFT, padx=(5, 0))
+
+        # Claude CLI 路径
+        ttk.Label(frame, text="Claude CLI 路径:", font=('', 11, 'bold')).grid(row=6, column=0, sticky=tk.W, pady=(0, 5))
+        self.claude_path_var = tk.StringVar(value=self.config.claude_path)
+        claude_frame = ttk.Frame(frame)
+        claude_frame.grid(row=7, column=0, columnspan=2, sticky=tk.EW, pady=(0, 5))
+        claude_entry = ttk.Entry(claude_frame, textvariable=self.claude_path_var, width=45, font=('', 11))
+        claude_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(claude_frame, text="自动检测", command=self._detect_claude, style='Small.TButton').pack(side=tk.LEFT, padx=(5, 0))
+
+        hint = tk.Label(frame, text="留空则自动检测。如自动检测失败，请手动指定路径。",
+                       font=('', 9), fg=self.COLORS['text_light'], bg=self.COLORS['bg'])
+        hint.grid(row=8, column=0, columnspan=2, sticky=tk.W, pady=(0, 20))
+
+        # 按钮
+        btn_frame = ttk.Frame(frame)
+        btn_frame.grid(row=9, column=0, columnspan=2, pady=(10, 0))
+
+        ttk.Button(btn_frame, text="测试连接", command=self._test_connection, style='Small.TButton').pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="保存", command=lambda: self._save_settings(settings_win), style='Accent.TButton').pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="取消", command=settings_win.destroy, style='Small.TButton').pack(side=tk.LEFT, padx=5)
+
+        frame.columnconfigure(0, weight=1)
+
+    def _detect_claude(self):
+        """自动检测 Claude CLI"""
+        path = find_claude_command()
+        if path:
+            self.claude_path_var.set(path)
+            self.log(f"检测到 Claude CLI: {path}")
+            messagebox.showinfo("成功", f"检测到 Claude CLI:\n{path}")
+        else:
+            messagebox.showwarning("未找到", "未能自动检测到 Claude CLI。\n\n请先安装:\nnpm install -g @anthropic-ai/claude-code\n\n或手动指定路径。")
+
+    def _save_settings(self, window):
+        """保存设置"""
+        self.config.server_url = self.server_var.get().strip()
+        self.config.default_name = self.name_var.get().strip()
+        self.config.default_workspace = self.workspace_var.get().strip()
+        self.config.claude_path = self.claude_path_var.get().strip()
+        self.config.save()
+
+        # 更新提示文本
+        self.hint_label.config(text=f"服务器: {self.config.server_url}  |  代理名称: {self.config.default_name}  |  点击「设置」修改配置")
+
+        self.log("配置已保存")
+        window.destroy()
+
+    def _show_agent_manager(self):
+        """显示代理管理窗口"""
+        agent_win = tk.Toplevel(self.root)
+        agent_win.title("代理管理")
+        agent_win.geometry("700x400")
+        agent_win.configure(bg=self.COLORS['bg'])
+
+        frame = ttk.Frame(agent_win, padding="20")
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(frame, text="已注册的代理", font=('', 14, 'bold')).pack(anchor=tk.W, pady=(0, 10))
+
+        # 表格
+        tree_frame = ttk.Frame(frame)
+        tree_frame.pack(fill=tk.BOTH, expand=True)
+
+        columns = ("name", "status", "agent_id", "url")
+        agent_tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=10)
+        agent_tree.heading("name", text="名称")
+        agent_tree.heading("status", text="状态")
+        agent_tree.heading("agent_id", text="Agent ID")
+        agent_tree.heading("url", text="访问地址")
+
+        agent_tree.column("name", width=100, minwidth=80)
+        agent_tree.column("status", width=70, minwidth=50)
+        agent_tree.column("agent_id", width=100, minwidth=80)
+        agent_tree.column("url", width=350, minwidth=200)
+
+        scrollbar = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=agent_tree.yview)
+        agent_tree.configure(yscrollcommand=scrollbar.set)
+
+        agent_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # 填充数据
+        for agent_id, instance in self.manager.instances.items():
+            agent_tree.insert("", tk.END, iid=agent_id, values=(
+                instance.name,
+                instance.status,
+                instance.agent_id,
+                instance.terminal_url
+            ))
+
+        # 操作按钮
+        btn_frame = ttk.Frame(frame)
+        btn_frame.pack(fill=tk.X, pady=(15, 0))
+
+        def get_selected():
+            selection = agent_tree.selection()
+            if not selection:
+                messagebox.showinfo("提示", "请先选择一个代理")
+                return None
+            return self.manager.instances.get(selection[0])
+
+        def start_agent():
+            instance = get_selected()
+            if instance and instance.status != "online":
+                self._run_async(self.manager.start_instance(instance))
+                agent_tree.set(instance.agent_id, "status", "connecting")
+
+        def stop_agent():
+            instance = get_selected()
+            if instance and instance.status == "online":
+                self._run_async(self.manager.stop_instance(instance))
+                agent_tree.set(instance.agent_id, "status", "stopping")
+
+        def copy_url():
+            instance = get_selected()
+            if instance:
+                self.root.clipboard_clear()
+                self.root.clipboard_append(instance.terminal_url)
+                self.log(f"已复制: {instance.terminal_url}")
+                messagebox.showinfo("已复制", f"地址已复制到剪贴板:\n{instance.terminal_url}")
+
+        def delete_agent():
+            instance = get_selected()
+            if instance:
+                if messagebox.askyesno("确认", f"确定要删除代理 {instance.name} 吗?"):
+                    if instance.status == "online":
+                        self._run_async(self.manager.stop_instance(instance))
+                    agent_tree.delete(instance.agent_id)
+                    self.tree.delete(instance.agent_id)
+                    del self.manager.instances[instance.agent_id]
+                    self._save_agents()
+                    self.log(f"已删除代理: {instance.name}")
+
+        ttk.Button(btn_frame, text="启动", command=start_agent, style='Small.TButton').pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(btn_frame, text="停止", command=stop_agent, style='Small.TButton').pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="复制地址", command=copy_url, style='Small.TButton').pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="删除", command=delete_agent, style='Small.TButton').pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="刷新", command=lambda: self._refresh_agent_tree(agent_tree), style='Small.TButton').pack(side=tk.LEFT, padx=5)
+
+        # 定时刷新状态
+        def update_status():
+            if agent_win.winfo_exists():
+                for agent_id, instance in self.manager.instances.items():
+                    try:
+                        agent_tree.set(agent_id, "status", instance.status)
+                    except:
+                        pass
+                agent_win.after(1000, update_status)
+        update_status()
+
+    def _refresh_agent_tree(self, tree):
+        """刷新代理列表"""
+        for item in tree.get_children():
+            tree.delete(item)
+        for agent_id, instance in self.manager.instances.items():
+            tree.insert("", tk.END, iid=agent_id, values=(
+                instance.name,
+                instance.status,
+                instance.agent_id,
+                instance.terminal_url
+            ))
 
     def _browse_workspace(self):
         """浏览工作目录"""
@@ -557,7 +787,12 @@ class AgentGUI:
         self.config.server_url = self.server_var.get().strip()
         self.config.default_name = self.name_var.get().strip()
         self.config.default_workspace = self.workspace_var.get().strip()
+        if hasattr(self, 'claude_path_var'):
+            self.config.claude_path = self.claude_path_var.get().strip()
         self.config.save()
+        # 更新提示文本
+        if hasattr(self, 'hint_label'):
+            self.hint_label.config(text=f"服务器: {self.config.server_url}  |  代理名称: {self.config.default_name}  |  点击「设置」修改配置")
         self.log("配置已保存")
 
     def _test_connection(self):
