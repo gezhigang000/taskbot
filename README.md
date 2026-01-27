@@ -1,376 +1,153 @@
 # Claude Code Remote
 
-[English](#english) | [中文](#中文)
+从手机远程访问本地 Claude Code CLI。
 
----
-
-## English
-
-**Access Claude Code from anywhere - phone, tablet, or any browser.**
+## 架构
 
 ```
-Mobile/Browser  <-->  Relay Server (Public IP)  <-->  Your Computer (Claude Code)
+┌─────────────┐         ┌─────────────────┐         ┌─────────────┐
+│   手机      │◄──HTTP──►│  FRP 服务器     │◄──TCP──►│   客户端    │
+│  (浏览器)   │          │ (taskbot.com.cn)│         │ (本地电脑)  │
+└─────────────┘          └─────────────────┘         └─────────────┘
+   xterm.js                   FRP 隧道                HTTP/SSE + PTY
 ```
 
-### Features
+**特点：**
+- 无需中继服务器，直接 P2P 连接（通过 FRP 穿透）
+- HTTP/SSE 协议，防火墙友好
+- GUI 客户端，一键启动
+- 手机端纯浏览器，无需安装 App
 
-- **Remote Access** - Use Claude Code from your phone or any device
-- **QR Code Login** - Scan to connect instantly
-- **Auto Reconnection** - Handles network interruptions gracefully
-- **Mobile Optimized** - Touch-friendly terminal with virtual keys
-- **Secure Relay** - Agent key authentication
-- **GUI Client** - Graphical interface for managing multiple agents
-- **Debug Logging** - Comprehensive logs for troubleshooting
+## 快速开始
 
-### Architecture
+### 1. 服务端部署（一次性）
 
-```
-┌─────────────────┐         ┌─────────────────┐         ┌─────────────────┐
-│   Mobile/Web    │◄──────►│  Relay Server   │◄──────►│  Local Agent    │
-│    Browser      │  WSS   │  (Public IP)    │   WS   │  (Claude Code)  │
-└─────────────────┘         └─────────────────┘         └─────────────────┘
-     xterm.js                   FastAPI                     PTY Process
-```
-
-### Quick Start
-
-#### 1. Install
+在有公网 IP 的服务器上运行：
 
 ```bash
-git clone https://github.com/your-repo/claude-code-remote.git
-cd claude-code-remote
-bash install.sh
+ssh root@your-server 'bash -s' < server/install.sh
 ```
 
-#### 2. Start Relay Server
+安装完成后记录显示的 **认证令牌**。
 
-On a server with public IP:
+配置 DNS 泛域名解析：
+- 类型：A
+- 主机记录：*
+- 记录值：服务器 IP
 
+### 2. 客户端使用
+
+#### macOS
+
+下载 `dist/Claude Code Remote.app`，双击运行。
+
+或从源码运行：
 ```bash
-./start-relay.sh
+pip install -r requirements.txt
+python agent/gui.py
 ```
 
-The server will run on `http://YOUR_SERVER_IP:8080`
+#### 配置
 
-#### 3. Start Local Agent
+1. 点击「设置」
+2. 填写 FRP 服务器地址和令牌
+3. 选择工作目录
+4. 点击「启动服务」
 
-On your computer with Claude Code installed:
+### 3. 手机连接
 
-```bash
-./start-agent.sh -s http://YOUR_SERVER_IP:8080
-```
+1. 点击「复制访问地址」
+2. 手机浏览器打开该地址
+3. 开始使用 Claude Code
 
-The agent will:
-- Auto-register with the relay server
-- Display access URL
-- Show QR code for mobile scanning
-
-#### 4. Connect from Mobile
-
-Scan the QR code shown in terminal, or visit the URL directly.
-
-### Usage
-
-#### Command Line Agent
-
-```bash
-# Basic usage
-./start-agent.sh -s http://relay.example.com:8080
-
-# Custom agent name
-./start-agent.sh -s http://relay.example.com:8080 -n "MacBook Pro"
-
-# Custom workspace directory
-./start-agent.sh -s http://relay.example.com:8080 -w ~/projects
-
-# Enable debug logging
-./start-agent.sh -s http://relay.example.com:8080 -d
-```
-
-#### GUI Client (Multi-Instance Support)
-
-```bash
-./start-gui.sh
-```
-
-The GUI client allows you to:
-- Configure server address visually
-- Create and manage multiple agent instances
-- Start/stop agents individually
-- Copy access URLs with one click
-- View real-time logs
-
-### API Reference
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/` | GET | Web dashboard |
-| `/api/agents` | GET | List all agents |
-| `/api/agents` | POST | Register new agent |
-| `/api/agents/{id}` | GET | Get agent status |
-| `/ws/agent/{id}?key=xxx` | WS | Agent WebSocket |
-| `/ws/client/{agent_id}` | WS | Client WebSocket |
-| `/terminal/{agent_id}` | GET | Terminal UI |
-| `/health` | GET | Health check |
-
-### Deployment
-
-#### Using nginx (recommended for HTTPS)
-
-```nginx
-server {
-    listen 443 ssl;
-    server_name relay.example.com;
-
-    ssl_certificate /path/to/cert.pem;
-    ssl_certificate_key /path/to/key.pem;
-
-    location / {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-    }
-}
-```
-
-#### Using Docker
-
-```bash
-docker build -t claude-code-remote .
-docker run -p 8080:8080 claude-code-remote
-```
-
-### Requirements
-
-- Python 3.8+
-- Claude Code CLI installed on local machine
-- Server with public IP for relay
-
-### Troubleshooting
-
-**Q: Mobile shows "Agent offline"?**
-A: Make sure the local agent is running and connected.
-
-**Q: Cannot connect to server?**
-A: Check if port 8080 is open in firewall.
-
-**Q: QR code not showing?**
-A: Run `pip install qrcode` to install the QR code library.
-
----
-
-## 中文
-
-**从任何设备远程访问 Claude Code - 手机、平板或浏览器**
-
-```
-手机/浏览器  <-->  中继服务器(公网IP)  <-->  你的电脑(Claude Code)
-```
-
-### 特性
-
-- **远程访问** - 从手机或任何设备使用 Claude Code
-- **二维码登录** - 扫码即连，方便快捷
-- **自动重连** - 优雅处理网络中断
-- **移动端优化** - 触控友好的终端界面，带虚拟按键
-- **安全中继** - Agent 密钥认证
-- **图形客户端** - 支持管理多个代理实例
-- **调试日志** - 完善的日志记录便于排查问题
-
-### 架构
-
-```
-┌─────────────────┐         ┌─────────────────┐         ┌─────────────────┐
-│   手机/浏览器    │◄──────►│   中继服务器     │◄──────►│    本地代理      │
-│    Browser      │  WSS   │  (公网IP)       │   WS   │  (Claude Code)  │
-└─────────────────┘         └─────────────────┘         └─────────────────┘
-     xterm.js                   FastAPI                     PTY 进程
-```
-
-### 快速开始
-
-#### 1. 安装
-
-```bash
-git clone https://github.com/your-repo/claude-code-remote.git
-cd claude-code-remote
-bash install.sh
-```
-
-#### 2. 启动中继服务器
-
-在有公网 IP 的服务器上：
-
-```bash
-./start-relay.sh
-```
-
-服务器会运行在 `http://服务器IP:8080`
-
-#### 3. 启动本地代理
-
-在安装了 Claude Code 的电脑上：
-
-```bash
-./start-agent.sh -s http://服务器IP:8080
-```
-
-代理会：
-- 自动向中继服务器注册
-- 显示访问地址
-- 显示二维码供手机扫描
-
-#### 4. 手机连接
-
-扫描终端显示的二维码，或直接访问显示的网址。
-
-### 使用方法
-
-#### 命令行代理
-
-```bash
-# 基本用法
-./start-agent.sh -s http://relay.example.com:8080
-
-# 自定义代理名称
-./start-agent.sh -s http://relay.example.com:8080 -n "我的MacBook"
-
-# 自定义工作目录
-./start-agent.sh -s http://relay.example.com:8080 -w ~/projects
-
-# 启用调试日志
-./start-agent.sh -s http://relay.example.com:8080 -d
-```
-
-#### 图形客户端（支持多实例）
-
-```bash
-./start-gui.sh
-```
-
-图形客户端功能：
-- 可视化配置服务器地址
-- 创建和管理多个代理实例
-- 单独启动/停止代理
-- 一键复制访问地址
-- 实时查看日志
-
-### API 接口
-
-| 端点 | 方法 | 描述 |
-|------|------|------|
-| `/` | GET | Web 管理界面 |
-| `/api/agents` | GET | 列出所有代理 |
-| `/api/agents` | POST | 注册新代理 |
-| `/api/agents/{id}` | GET | 获取代理状态 |
-| `/ws/agent/{id}?key=xxx` | WS | 代理 WebSocket |
-| `/ws/client/{agent_id}` | WS | 客户端 WebSocket |
-| `/terminal/{agent_id}` | GET | 终端界面 |
-| `/health` | GET | 健康检查 |
-
-### 部署
-
-#### 使用 nginx（推荐，支持 HTTPS）
-
-```nginx
-server {
-    listen 443 ssl;
-    server_name relay.example.com;
-
-    ssl_certificate /path/to/cert.pem;
-    ssl_certificate_key /path/to/key.pem;
-
-    location / {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-    }
-}
-```
-
-#### 使用 Docker
-
-```bash
-docker build -t claude-code-remote .
-docker run -p 8080:8080 claude-code-remote
-```
-
-### 环境要求
-
-- Python 3.8+
-- 本地电脑需安装 Claude Code CLI
-- 中继服务器需要公网 IP
-
-### GUI 客户端依赖
-
-GUI 客户端需要 Tkinter（Python 内置 GUI 库）：
-
-```bash
-# macOS
-brew install python-tk
-
-# Ubuntu/Debian
-sudo apt install python3-tk
-
-# Windows - 通常已包含在 Python 安装中
-```
-
-### 打包独立应用
-
-生成不需要 Python 环境的独立应用程序：
-
-```bash
-# 安装打包工具
-pip install pyinstaller
-
-# 打包 (自动检测当前平台)
-python build.py
-
-# 输出位置
-# macOS: dist/Claude Code Remote.app
-# Windows: dist/Claude Code Remote.exe
-# Linux: dist/claude-code-remote
-```
-
-### 常见问题
-
-**Q: 手机显示 "Agent offline"？**
-A: 确保本地代理正在运行并已连接。
-
-**Q: 无法连接服务器？**
-A: 检查防火墙是否开放了 8080 端口。
-
-**Q: 二维码不显示？**
-A: 运行 `pip install qrcode` 安装二维码库。
-
----
-
-## Project Structure
+## 文件结构
 
 ```
 claude-code-remote/
-├── relay/
-│   └── server.py      # Relay server (FastAPI + WebSocket)
 ├── agent/
-│   ├── agent.py       # Command-line agent (PTY + WebSocket)
-│   └── gui.py         # GUI client (Tkinter)
-├── install.sh         # One-click installation
-├── start-relay.sh     # Start relay server
-├── start-agent.sh     # Start command-line agent
-├── start-gui.sh       # Start GUI client
-├── requirements.txt   # Python dependencies
-├── ARCHITECTURE.md    # System architecture docs
-└── README.md          # This file
+│   ├── gui.py          # GUI 客户端
+│   ├── server.py       # HTTP/SSE 服务器
+│   ├── frp.py          # FRP 客户端管理
+│   ├── cli.py          # 命令行入口
+│   └── terminal.html   # 手机端终端页面
+├── server/
+│   ├── install.sh      # 服务端一键安装
+│   ├── frps.toml       # FRP 服务端配置
+│   └── nginx.conf      # Nginx 配置（可选）
+├── build.py            # 打包脚本
+└── requirements.txt    # Python 依赖
 ```
+
+## 打包
+
+```bash
+pip install pyinstaller
+python build.py
+```
+
+输出：`dist/Claude Code Remote.app`
+
+## 服务端管理
+
+```bash
+# 查看状态
+systemctl status frps
+
+# 查看日志
+journalctl -u frps -f
+
+# 重启服务
+systemctl restart frps
+
+# 查看配置
+cat /etc/frp/frps.toml
+```
+
+## 端口说明
+
+| 端口 | 用途 |
+|------|------|
+| 7000 | FRP 客户端连接 |
+| 8080 | HTTP 代理（手机访问） |
+| 7500 | FRP 管理面板（本地） |
+
+## 常见问题
+
+**Q: 手机显示 "page not found"？**
+
+A: FRP 客户端未连接。检查：
+1. 服务端 frps 是否运行：`systemctl status frps`
+2. 客户端 FRP 令牌是否正确
+3. 客户端日志是否显示「FRP 隧道已建立」
+
+**Q: FRP 服务启动失败？**
+
+A: 查看日志：`journalctl -u frps -n 30`
+- 端口被占用：修改 `/etc/frp/frps.toml` 中的端口
+- 配置错误：检查 toml 语法
+
+**Q: 连接超时？**
+
+A: 检查服务器防火墙：
+```bash
+ufw allow 7000/tcp
+ufw allow 8080/tcp
+```
+
+**Q: 如何更换端口？**
+
+A: 编辑 `/etc/frp/frps.toml`：
+```toml
+bindPort = 7000        # FRP 连接端口
+vhostHTTPPort = 8080   # HTTP 代理端口
+```
+
+## 依赖
+
+- Python 3.8+
+- Claude Code CLI
+- FRP 服务器（公网）
 
 ## License
 
-MIT License
-
-## Contributing
-
-Issues and Pull Requests are welcome!
+MIT

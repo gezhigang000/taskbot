@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_submodules
 
-hiddenimports = ['asyncio', 'tkinter', 'tkinter.ttk', 'tkinter.scrolledtext', 'tkinter.filedialog', 'tkinter.messagebox', 'json', 'urllib.request', 'urllib.parse', 'threading', 'pathlib', 'subprocess', 'signal', 'pty', 'select', 'fcntl', 'termios', 'struct']
+hiddenimports = ['agent.server', 'agent.frp', 'asyncio', 'tkinter', 'tkinter.ttk', 'tkinter.scrolledtext', 'tkinter.filedialog', 'tkinter.messagebox', 'json', 'secrets', 'urllib.request', 'urllib.parse', 'threading', 'pathlib', 'subprocess', 'signal', 'pty', 'select', 'fcntl', 'termios', 'struct', 'shutil']
 hiddenimports += collect_submodules('uvicorn')
 hiddenimports += collect_submodules('fastapi')
 

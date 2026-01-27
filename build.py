@@ -66,6 +66,12 @@ def build_mac(onefile=False):
         "--add-data", "agent/terminal.html:agent",
     ])
 
+    # agent 模块（GUI 直接导入）
+    cmd.extend([
+        "--hidden-import", "agent.server",
+        "--hidden-import", "agent.frp",
+    ])
+
     # 隐藏导入
     cmd.extend([
         "--hidden-import", "asyncio",
@@ -75,6 +81,7 @@ def build_mac(onefile=False):
         "--hidden-import", "tkinter.filedialog",
         "--hidden-import", "tkinter.messagebox",
         "--hidden-import", "json",
+        "--hidden-import", "secrets",
         "--hidden-import", "urllib.request",
         "--hidden-import", "urllib.parse",
         "--hidden-import", "threading",
@@ -86,6 +93,7 @@ def build_mac(onefile=False):
         "--hidden-import", "fcntl",
         "--hidden-import", "termios",
         "--hidden-import", "struct",
+        "--hidden-import", "shutil",
     ])
 
     # FastAPI + uvicorn

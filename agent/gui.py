@@ -7,12 +7,12 @@ Claude Code Remote - GUI 客户端
   python gui.py
 """
 
+import asyncio
 import json
 import logging
 import os
 import platform
-import signal
-import subprocess
+import secrets
 import sys
 import threading
 import tkinter as tk
@@ -20,6 +20,16 @@ from tkinter import ttk, messagebox, scrolledtext, filedialog
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+import uvicorn
+
+# 导入本地模块
+try:
+    from agent.server import create_app
+    from agent.frp import FRPClient, download_frpc
+except ImportError:
+    from server import create_app
+    from frp import FRPClient, download_frpc
 
 
 # ============================================================================
@@ -108,8 +118,12 @@ class AgentGUI:
         self.root.configure(bg=COLORS['bg'])
 
         self.config = AppConfig()
-        self.server_process: Optional[subprocess.Popen] = None
         self.is_running = False
+        self.server_thread: Optional[threading.Thread] = None
+        self.uvicorn_server: Optional[uvicorn.Server] = None
+        self.frp_client: Optional[FRPClient] = None
+        self.access_token: Optional[str] = None
+        self.loop: Optional[asyncio.AbstractEventLoop] = None
 
         self._setup_styles()
         self._setup_ui()
@@ -237,7 +251,7 @@ class AgentGUI:
     def _show_settings(self):
         win = tk.Toplevel(self.root)
         win.title("设置")
-        win.geometry("500x420")
+        win.geometry("500x450")
         win.configure(bg=COLORS['bg'])
         win.transient(self.root)
         win.grab_set()
@@ -245,45 +259,53 @@ class AgentGUI:
         frame = ttk.Frame(win, padding="20")
         frame.pack(fill=tk.BOTH, expand=True)
 
-        row = 0
-        fields = {}
+        # 使用实例变量存储 StringVar，防止被垃圾回收
+        self._setting_vars = {}
+        entries = {}
 
-        def add_field(label, key, default_val, hint=""):
-            nonlocal row
+        def add_field(row, label, key, hint=""):
             ttk.Label(frame, text=label, font=('', 11, 'bold')).grid(
                 row=row, column=0, sticky=tk.W, pady=(0, 3))
-            row += 1
+
             var = tk.StringVar(value=str(getattr(self.config, key)))
-            entry = ttk.Entry(frame, textvariable=var, width=50, font=('', 11))
-            entry.grid(row=row, column=0, sticky=tk.EW, pady=(0, 3))
-            fields[key] = var
-            row += 1
+            self._setting_vars[key] = var  # 保存引用防止 GC
+
+            entry = tk.Entry(frame, textvariable=var, width=50, font=('', 11),
+                           bg=COLORS['bg_light'], fg=COLORS['text'],
+                           relief='solid', bd=1)
+            entry.grid(row=row + 1, column=0, sticky=tk.EW, pady=(0, 3))
+            entries[key] = entry
+
             if hint:
                 tk.Label(frame, text=hint, font=('', 9),
                          fg=COLORS['text_light'], bg=COLORS['bg']).grid(
-                    row=row, column=0, sticky=tk.W, pady=(0, 12))
-                row += 1
+                    row=row + 2, column=0, sticky=tk.W, pady=(0, 10))
+            return row + 3
 
-        add_field("FRP 服务器:", "frp_server", self.config.frp_server,
-                  "远程服务器域名，如 taskbot.com.cn")
-        add_field("FRP 端口:", "frp_port", self.config.frp_port,
-                  "FRP 服务端口，默认 7000")
-        add_field("FRP 令牌:", "frp_token", self.config.frp_token,
-                  "服务器认证令牌（可选）")
-        add_field("本地端口:", "local_port", self.config.local_port,
-                  "本地 HTTP 服务端口，默认 8080")
-        add_field("Claude CLI 路径:", "claude_path", self.config.claude_path,
-                  "留空自动检测")
+        row = 0
+        row = add_field(row, "FRP 服务器:", "frp_server",
+                        "远程服务器域名，如 taskbot.com.cn")
+        row = add_field(row, "FRP 端口:", "frp_port",
+                        "FRP 服务端口，默认 7000")
+        row = add_field(row, "FRP 令牌:", "frp_token",
+                        "服务器认证令牌（从服务端获取）")
+        row = add_field(row, "本地端口:", "local_port",
+                        "本地 HTTP 服务端口，默认 8080")
+        row = add_field(row, "Claude CLI 路径:", "claude_path",
+                        "留空自动检测")
 
         def save():
-            self.config.frp_server = fields["frp_server"].get().strip()
-            self.config.frp_port = int(fields["frp_port"].get().strip() or "7000")
-            self.config.frp_token = fields["frp_token"].get().strip()
-            self.config.local_port = int(fields["local_port"].get().strip() or "8080")
-            self.config.claude_path = fields["claude_path"].get().strip()
-            self.config.save()
-            self.log("设置已保存")
-            win.destroy()
+            try:
+                self.config.frp_server = self._setting_vars["frp_server"].get().strip()
+                self.config.frp_port = int(self._setting_vars["frp_port"].get().strip() or "7000")
+                self.config.frp_token = self._setting_vars["frp_token"].get().strip()
+                self.config.local_port = int(self._setting_vars["local_port"].get().strip() or "8080")
+                self.config.claude_path = self._setting_vars["claude_path"].get().strip()
+                self.config.save()
+                self.log("设置已保存")
+                win.destroy()
+            except ValueError as e:
+                messagebox.showerror("错误", f"端口必须是数字: {e}")
 
         btn_frame = ttk.Frame(frame)
         btn_frame.grid(row=row, column=0, pady=(15, 0))
@@ -306,73 +328,135 @@ class AgentGUI:
             messagebox.showerror("错误", "请选择工作目录")
             return
 
+        if not os.path.isdir(workspace):
+            messagebox.showerror("错误", "工作目录不存在")
+            return
+
         self.config.workspace = workspace
         self.config.save()
 
         self.log("正在启动服务...")
         self.start_btn.configure(text="正在启动...", state="disabled")
 
-        def run():
+        def run_server():
             try:
-                cmd = [
-                    sys.executable, "-m", "agent.cli",
-                    "--port", str(self.config.local_port),
-                    "--workspace", workspace,
-                ]
+                # 生成访问令牌
+                self.access_token = secrets.token_urlsafe(16)
 
-                if self.config.frp_server:
-                    cmd.extend(["--server", self.config.frp_server])
-                    cmd.extend(["--server-port", str(self.config.frp_port)])
-                    if self.config.frp_token:
-                        cmd.extend(["--frp-token", self.config.frp_token])
-
-                if self.config.claude_path:
-                    cmd.extend(["--claude-path", self.config.claude_path])
-
-                # 从项目根目录运行
-                project_dir = str(Path(__file__).parent.parent)
-
-                self.server_process = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    cwd=project_dir,
-                    bufsize=1,
+                # 创建 FastAPI 应用
+                self.log("创建服务器...")
+                app = create_app(
+                    workspace=workspace,
+                    claude_path=self.config.claude_path or None,
+                    access_token=self.access_token,
                 )
+
+                # 配置 uvicorn
+                config = uvicorn.Config(
+                    app,
+                    host="127.0.0.1",
+                    port=self.config.local_port,
+                    log_level="warning",
+                )
+                self.uvicorn_server = uvicorn.Server(config)
+
+                # 创建事件循环
+                self.loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(self.loop)
 
                 self.is_running = True
                 self.root.after(0, lambda: self._update_ui_running(True))
 
-                # 读取输出
-                for line in self.server_process.stdout:
-                    line = line.rstrip()
-                    if line:
-                        self.root.after(0, lambda l=line: self.log(l))
+                # 显示本地地址
+                local_url = f"http://localhost:{self.config.local_port}?token={self.access_token}"
+                self.root.after(0, lambda: self.log(""))
+                self.root.after(0, lambda: self.log("=" * 50))
+                self.root.after(0, lambda: self.log(f"  本地地址: {local_url}"))
 
-                # 进程结束
-                self.is_running = False
-                self.root.after(0, lambda: self._update_ui_running(False))
-                self.root.after(0, lambda: self.log("服务已停止", "error"))
+                # 启动 FRP 隧道（在后台线程中，不阻塞）
+                if self.config.frp_server:
+                    threading.Thread(target=self._start_frp, daemon=True).start()
 
+                self.root.after(0, lambda: self.log("=" * 50))
+                self.root.after(0, lambda: self.log(""))
+
+                # 运行服务器（阻塞）
+                self.loop.run_until_complete(self.uvicorn_server.serve())
+
+            except FileNotFoundError as e:
+                self.root.after(0, lambda: self.log(f"错误: {e}", "error"))
+            except OSError as e:
+                if "Address already in use" in str(e):
+                    self.root.after(0, lambda: self.log(f"错误: 端口 {self.config.local_port} 已被占用", "error"))
+                else:
+                    self.root.after(0, lambda: self.log(f"错误: {e}", "error"))
             except Exception as e:
+                self.root.after(0, lambda: self.log(f"启动失败: {e}", "error"))
+            finally:
                 self.is_running = False
                 self.root.after(0, lambda: self._update_ui_running(False))
-                self.root.after(0, lambda: self.log(f"启动失败: {e}", "error"))
+                if self.loop:
+                    self.loop.close()
+                    self.loop = None
 
-        threading.Thread(target=run, daemon=True).start()
+        self.server_thread = threading.Thread(target=run_server, daemon=True)
+        self.server_thread.start()
+
+    def _start_frp(self):
+        """启动 FRP 隧道"""
+        try:
+            self.log("正在启动 FRP 隧道...")
+
+            # 检查/下载 frpc
+            frpc_path = download_frpc()
+            if not frpc_path:
+                self.log("警告: 无法下载 frpc，仅使用本地访问", "error")
+                return
+
+            # 创建 FRP 客户端
+            self.frp_client = FRPClient(
+                server_addr=self.config.frp_server,
+                server_port=self.config.frp_port,
+                auth_token=self.config.frp_token,
+                agent_id=self.config.agent_id,
+                local_port=self.config.local_port,
+            )
+
+            # 启动 FRP
+            if self.frp_client.start(frpc_path):
+                public_url = f"{self.frp_client.public_url}?token={self.access_token}"
+                self.log(f"  FRP 隧道已建立")
+                self.log(f"  远程地址: {public_url}")
+
+                # 保存 agent_id
+                if self.frp_client.agent_id != self.config.agent_id:
+                    self.config.agent_id = self.frp_client.agent_id
+                    self.config.save()
+            else:
+                self.log("警告: FRP 隧道启动失败", "error")
+
+        except Exception as e:
+            self.log(f"FRP 错误: {e}", "error")
 
     def _stop_service(self):
         self.log("正在停止服务...")
-        if self.server_process:
+
+        # 停止 FRP
+        if self.frp_client:
             try:
-                self.server_process.send_signal(signal.SIGTERM)
-                self.server_process.wait(timeout=5)
-            except (subprocess.TimeoutExpired, OSError):
-                self.server_process.kill()
-            self.server_process = None
+                self.frp_client.stop()
+            except Exception:
+                pass
+            self.frp_client = None
+
+        # 停止 uvicorn
+        if self.uvicorn_server:
+            self.uvicorn_server.should_exit = True
+            self.uvicorn_server = None
+
         self.is_running = False
         self._update_ui_running(False)
+        self.log("服务已停止")
 
     def _update_ui_running(self, running: bool):
         if running:
@@ -383,22 +467,19 @@ class AgentGUI:
             self.status_label.configure(text="未运行", fg=COLORS['text_light'])
 
     def _copy_url(self):
-        # 从日志中查找地址
-        content = self.log_text.get("1.0", tk.END)
-        for line in content.split("\n"):
-            if "token=" in line and ("http://" in line or "https://" in line):
-                url = line.strip().split()[-1] if line.strip() else ""
-                if not url:
-                    for word in line.split():
-                        if "http" in word:
-                            url = word
-                            break
-                if url:
-                    self.root.clipboard_clear()
-                    self.root.clipboard_append(url)
-                    self.log("地址已复制到剪贴板")
-                    return
-        messagebox.showinfo("提示", "请先启动服务")
+        if not self.is_running or not self.access_token:
+            messagebox.showinfo("提示", "请先启动服务")
+            return
+
+        # 优先使用远程地址
+        if self.frp_client and self.frp_client.public_url:
+            url = f"{self.frp_client.public_url}?token={self.access_token}"
+        else:
+            url = f"http://localhost:{self.config.local_port}?token={self.access_token}"
+
+        self.root.clipboard_clear()
+        self.root.clipboard_append(url)
+        self.log(f"地址已复制: {url}")
 
     def _clear_log(self):
         self.log_text.configure(state=tk.NORMAL)
@@ -422,6 +503,9 @@ class AgentGUI:
         self.root.after(0, _log)
 
     def run(self):
+        # 设置日志处理器，将日志输出到 GUI
+        self._setup_logging()
+
         self.log("Claude Code Remote GUI 已启动")
         self.log(f"配置文件: {get_config_file()}")
         self.log("")
@@ -439,6 +523,26 @@ class AgentGUI:
 
         self.root.protocol("WM_DELETE_WINDOW", on_closing)
         self.root.mainloop()
+
+    def _setup_logging(self):
+        """将 Python 日志重定向到 GUI"""
+
+        class GUILogHandler(logging.Handler):
+            def __init__(self, gui):
+                super().__init__()
+                self.gui = gui
+
+            def emit(self, record):
+                msg = self.format(record)
+                self.gui.root.after(0, lambda: self.gui.log(msg))
+
+        handler = GUILogHandler(self)
+        handler.setFormatter(logging.Formatter("%(message)s"))
+
+        for name in ["claude-remote", "uvicorn", "uvicorn.error"]:
+            logger = logging.getLogger(name)
+            logger.addHandler(handler)
+            logger.setLevel(logging.INFO)
 
 
 if __name__ == "__main__":
