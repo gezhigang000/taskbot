@@ -66,6 +66,10 @@ def build_mac(onefile=False):
         "--add-data", "agent/terminal.html:agent",
     ])
 
+    # 内置 frpc（如果存在）
+    if os.path.exists("agent/resources/frpc"):
+        cmd.extend(["--add-data", "agent/resources/frpc:resources"])
+
     # agent 模块（GUI 直接导入）
     cmd.extend([
         "--hidden-import", "agent.server",

@@ -44,16 +44,36 @@ def get_frp_dir() -> Path:
 
 
 def get_frpc_path() -> Optional[str]:
-    """获取 frpc 可执行文件路径"""
-    # 先检查系统 PATH
-    found = shutil.which("frpc")
-    if found:
-        return found
-
-    # 检查本地安装
+    """获取 frpc 可执行文件路径
+    
+    查找顺序：
+    1. 应用内置资源（打包后）
+    2. 开发目录资源
+    3. 用户数据目录（下载缓存）
+    4. 系统 PATH
+    """
+    # 1. 检查应用内置资源（PyInstaller 打包后）
+    if getattr(sys, 'frozen', False):
+        # 打包后的应用
+        bundle_dir = Path(sys._MEIPASS) / "resources"
+        frpc = bundle_dir / "frpc"
+        if frpc.exists() and os.access(frpc, os.X_OK):
+            return str(frpc)
+    
+    # 2. 检查开发目录资源
+    dev_resources = Path(__file__).parent / "resources" / "frpc"
+    if dev_resources.exists() and os.access(dev_resources, os.X_OK):
+        return str(dev_resources)
+    
+    # 3. 检查用户数据目录（下载缓存）
     local_path = get_frp_dir() / "frpc"
     if local_path.exists() and os.access(local_path, os.X_OK):
         return str(local_path)
+    
+    # 4. 检查系统 PATH
+    found = shutil.which("frpc")
+    if found:
+        return found
 
     return None
 
@@ -77,38 +97,54 @@ def _get_platform_info():
     return os_name, arch
 
 
-def download_frpc(progress_callback=None) -> str:
-    """下载 frpc 到本地"""
+def download_frpc(progress_callback=None) -> Optional[str]:
+    """下载 frpc 到本地（如果尚未安装）"""
+    # 先检查是否已有 frpc
+    existing = get_frpc_path()
+    if existing:
+        logger.debug(f"frpc 已存在: {existing}")
+        return existing
+
     os_name, arch = _get_platform_info()
     url = FRP_DOWNLOAD_URL.format(version=FRP_VERSION, os=os_name, arch=arch)
 
-    frp_dir = get_frp_dir()
+    # 决定保存位置：开发环境保存到 agent/resources，否则保存到用户目录
+    if not getattr(sys, 'frozen', False):
+        # 开发环境：保存到项目资源目录
+        frp_dir = Path(__file__).parent / "resources"
+        frp_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        # 打包环境：保存到用户目录
+        frp_dir = get_frp_dir()
+    
     frpc_path = frp_dir / "frpc"
 
-    if frpc_path.exists():
-        logger.info(f"frpc 已存在: {frpc_path}")
-        return str(frpc_path)
-
-    logger.info(f"下载 frpc: {url}")
+    logger.info(f"首次运行，正在下载 frpc v{FRP_VERSION}...")
+    logger.info(f"下载地址: {url}")
+    logger.info(f"保存位置: {frpc_path}")
     if progress_callback:
-        progress_callback(f"正在下载 frpc v{FRP_VERSION}...")
-
-    # 下载到临时文件
-    with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
-        tmp_path = tmp.name
-        urllib.request.urlretrieve(url, tmp_path)
+        progress_callback(f"首次运行，正在下载 frpc...")
 
     try:
+        # 下载到临时文件
+        with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
+            tmp_path = tmp.name
+            urllib.request.urlretrieve(url, tmp_path)
+
         # 解压
         import tarfile
-
         with tarfile.open(tmp_path, "r:gz") as tar:
-            # 查找 frpc 文件
+            # 查找 frpc 文件（在子目录中）
             for member in tar.getmembers():
                 if member.name.endswith("/frpc") or member.name == "frpc":
-                    member.name = "frpc"
-                    tar.extract(member, path=str(frp_dir))
-                    break
+                    # 提取文件内容
+                    f = tar.extractfile(member)
+                    if f:
+                        frpc_path.write_bytes(f.read())
+                        break
+
+        # 删除临时文件
+        os.unlink(tmp_path)
 
         # 设置可执行权限
         os.chmod(frpc_path, 0o755)
@@ -118,8 +154,12 @@ def download_frpc(progress_callback=None) -> str:
             progress_callback("frpc 下载完成")
 
         return str(frpc_path)
-    finally:
-        os.unlink(tmp_path)
+        
+    except Exception as e:
+        logger.error(f"下载 frpc 失败: {e}")
+        if progress_callback:
+            progress_callback(f"下载失败: {e}")
+        return None
 
 
 class FRPClient:
@@ -182,14 +222,24 @@ customDomains = ["{self.agent_id}.{self.server_addr}"]
         logger.info(f"FRP 配置: {config_path}")
         return self._config_path
 
-    def start(self, frpc_path: Optional[str] = None) -> bool:
-        """启动 FRP 客户端"""
+    def start(self, frpc_path: Optional[str] = None, timeout: float = 10.0) -> bool:
+        """启动 FRP 客户端
+        
+        Args:
+            frpc_path: frpc 可执行文件路径
+            timeout: 等待连接成功的超时时间（秒）
+        """
         frpc = frpc_path or get_frpc_path()
         if not frpc:
             logger.error("未找到 frpc，请先下载")
             return False
 
         config_path = self._write_config()
+        logger.info(f"正在启动 frpc: {frpc}")
+        logger.info(f"配置文件: {config_path}")
+        logger.info(f"目标服务器: {self.server_addr}:{self.server_port}")
+        logger.info(f"本地端口: {self.local_port}")
+        logger.info(f"Agent ID: {self.agent_id}")
 
         try:
             self.process = subprocess.Popen(
@@ -198,11 +248,76 @@ customDomains = ["{self.agent_id}.{self.server_addr}"]
                 stderr=subprocess.STDOUT,
                 text=True,
             )
-            logger.info(f"frpc 已启动 (PID: {self.process.pid})")
-            return True
+            logger.info(f"frpc 进程已启动 (PID: {self.process.pid})")
+            
+            # 等待并检查启动状态
+            import time
+            start_time = time.time()
+            connected = False
+            error_msg = None
+            
+            while time.time() - start_time < timeout:
+                # 检查进程是否异常退出
+                if self.process.poll() is not None:
+                    # 进程已退出，读取所有输出
+                    remaining = self.process.stdout.read() if self.process.stdout else ""
+                    logger.error(f"frpc 进程异常退出，退出码: {self.process.returncode}")
+                    if remaining:
+                        for line in remaining.strip().split("\n"):
+                            logger.error(f"  frpc: {line}")
+                    return False
+                
+                # 尝试读取输出
+                line = self._read_line_nonblock()
+                if line:
+                    line = line.strip()
+                    if line:
+                        # 记录 frpc 输出
+                        if "error" in line.lower() or "failed" in line.lower():
+                            logger.warning(f"frpc: {line}")
+                            error_msg = line
+                        elif "start proxy success" in line.lower():
+                            logger.info(f"frpc: {line}")
+                            connected = True
+                            break
+                        elif "login to server success" in line.lower():
+                            logger.info(f"frpc: {line}")
+                        else:
+                            logger.debug(f"frpc: {line}")
+                else:
+                    time.sleep(0.1)
+            
+            if connected:
+                logger.info(f"FRP 隧道连接成功: {self.public_url}")
+                return True
+            elif error_msg:
+                logger.error(f"FRP 隧道连接失败: {error_msg}")
+                return False
+            else:
+                # 超时但进程还在运行，可能是网络慢
+                if self.is_running():
+                    logger.warning(f"FRP 隧道启动超时({timeout}秒)，但进程仍在运行")
+                    logger.warning("可能是网络连接较慢，隧道可能稍后建立成功")
+                    return True
+                else:
+                    logger.error("FRP 隧道启动失败，进程已退出")
+                    return False
+                    
         except Exception as e:
             logger.error(f"启动 frpc 失败: {e}")
             return False
+
+    def _read_line_nonblock(self) -> Optional[str]:
+        """非阻塞读取一行输出"""
+        if self.process and self.process.stdout:
+            try:
+                import select as sel
+                ready, _, _ = sel.select([self.process.stdout], [], [], 0)
+                if ready:
+                    return self.process.stdout.readline()
+            except (OSError, ValueError):
+                pass
+        return None
 
     def stop(self):
         """停止 FRP 客户端"""

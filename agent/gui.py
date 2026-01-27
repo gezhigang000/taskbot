@@ -151,7 +151,7 @@ class AgentGUI:
                         background=COLORS['accent_light'],
                         foreground=COLORS['text'],
                         borderwidth=0, focuscolor='none',
-                        font=('', 10), padding=(15, 8))
+                        font=('', 10), padding=(10, 5))
         style.map('TButton',
                   background=[('active', COLORS['accent_hover']),
                               ('pressed', COLORS['accent'])],
@@ -161,7 +161,7 @@ class AgentGUI:
                         background=COLORS['accent'],
                         foreground='white',
                         borderwidth=0, focuscolor='none',
-                        font=('', 13, 'bold'), padding=(20, 12))
+                        font=('', 12, 'bold'), padding=(12, 6))
         style.map('Accent.TButton',
                   background=[('active', COLORS['accent_hover']),
                               ('pressed', '#A0522D')])
@@ -170,7 +170,7 @@ class AgentGUI:
                         background=COLORS['error'],
                         foreground='white',
                         borderwidth=0, focuscolor='none',
-                        font=('', 13, 'bold'), padding=(20, 12))
+                        font=('', 12, 'bold'), padding=(12, 6))
         style.map('Stop.TButton',
                   background=[('active', '#D32F2F'),
                               ('pressed', '#B71C1C')])
@@ -178,7 +178,7 @@ class AgentGUI:
         style.configure('Small.TButton',
                         background=COLORS['bg_dark'],
                         foreground=COLORS['text'],
-                        font=('', 9), padding=(8, 4))
+                        font=('', 9), padding=(6, 3))
 
     def _setup_ui(self):
         main = ttk.Frame(self.root, padding="15")
@@ -240,8 +240,9 @@ class AgentGUI:
         bottom.pack(fill=tk.X, pady=(8, 0))
         ttk.Button(bottom, text="清空日志", command=self._clear_log,
                    style='Small.TButton').pack(side=tk.LEFT)
-        ttk.Button(bottom, text="复制访问地址", command=self._copy_url,
-                   style='Small.TButton').pack(side=tk.LEFT, padx=5)
+        self.copy_url_btn = ttk.Button(bottom, text="复制访问地址", command=self._copy_url,
+                   style='Small.TButton', state='disabled')
+        self.copy_url_btn.pack(side=tk.LEFT, padx=5)
 
     def _browse_workspace(self):
         path = filedialog.askdirectory(initialdir=self.workspace_var.get())
@@ -251,12 +252,12 @@ class AgentGUI:
     def _show_settings(self):
         win = tk.Toplevel(self.root)
         win.title("设置")
-        win.geometry("500x450")
+        win.geometry("500x480")
         win.configure(bg=COLORS['bg'])
         win.transient(self.root)
         win.grab_set()
 
-        frame = ttk.Frame(win, padding="20")
+        frame = ttk.Frame(win, padding="15")
         frame.pack(fill=tk.BOTH, expand=True)
 
         # 使用实例变量存储 StringVar，防止被垃圾回收
@@ -264,22 +265,22 @@ class AgentGUI:
         entries = {}
 
         def add_field(row, label, key, hint=""):
-            ttk.Label(frame, text=label, font=('', 11, 'bold')).grid(
-                row=row, column=0, sticky=tk.W, pady=(0, 3))
+            ttk.Label(frame, text=label, font=('', 10, 'bold')).grid(
+                row=row, column=0, sticky=tk.W, pady=(0, 2))
 
             var = tk.StringVar(value=str(getattr(self.config, key)))
             self._setting_vars[key] = var  # 保存引用防止 GC
 
-            entry = tk.Entry(frame, textvariable=var, width=50, font=('', 11),
+            entry = tk.Entry(frame, textvariable=var, width=50, font=('', 10),
                            bg=COLORS['bg_light'], fg=COLORS['text'],
                            relief='solid', bd=1)
-            entry.grid(row=row + 1, column=0, sticky=tk.EW, pady=(0, 3))
+            entry.grid(row=row + 1, column=0, sticky=tk.EW, pady=(0, 2))
             entries[key] = entry
 
             if hint:
-                tk.Label(frame, text=hint, font=('', 9),
+                tk.Label(frame, text=hint, font=('', 8),
                          fg=COLORS['text_light'], bg=COLORS['bg']).grid(
-                    row=row + 2, column=0, sticky=tk.W, pady=(0, 10))
+                    row=row + 2, column=0, sticky=tk.W, pady=(0, 8))
             return row + 3
 
         row = 0
@@ -308,7 +309,7 @@ class AgentGUI:
                 messagebox.showerror("错误", f"端口必须是数字: {e}")
 
         btn_frame = ttk.Frame(frame)
-        btn_frame.grid(row=row, column=0, pady=(15, 0))
+        btn_frame.grid(row=row, column=0, pady=(10, 0))
         ttk.Button(btn_frame, text="保存", command=save,
                    style='Accent.TButton').pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="取消", command=win.destroy,
@@ -411,10 +412,11 @@ class AgentGUI:
             frpc_path = download_frpc()
             if not frpc_path:
                 self.log("警告: 无法下载 frpc，仅使用本地访问", "error")
+                self.root.after(0, lambda: self.copy_url_btn.configure(text="复制本地地址"))
                 return
 
             # 创建 FRP 客户端
-            self.frp_client = FRPClient(
+            frp_client = FRPClient(
                 server_addr=self.config.frp_server,
                 server_port=self.config.frp_port,
                 auth_token=self.config.frp_token,
@@ -423,20 +425,25 @@ class AgentGUI:
             )
 
             # 启动 FRP
-            if self.frp_client.start(frpc_path):
+            if frp_client.start(frpc_path):
+                self.frp_client = frp_client  # 只在成功时保存
                 public_url = f"{self.frp_client.public_url}?token={self.access_token}"
                 self.log(f"  FRP 隧道已建立")
-                self.log(f"  远程地址: {public_url}")
+                self.log(f"  远程地址: {public_url}", "highlight")
+                self.root.after(0, lambda: self.copy_url_btn.configure(text="复制远程地址"))
 
                 # 保存 agent_id
                 if self.frp_client.agent_id != self.config.agent_id:
                     self.config.agent_id = self.frp_client.agent_id
                     self.config.save()
             else:
-                self.log("警告: FRP 隧道启动失败", "error")
+                self.log("警告: FRP 隧道启动失败，仅使用本地访问", "error")
+                self.root.after(0, lambda: self.copy_url_btn.configure(text="复制本地地址"))
+                frp_client.stop()  # 清理进程
 
         except Exception as e:
             self.log(f"FRP 错误: {e}", "error")
+            self.root.after(0, lambda: self.copy_url_btn.configure(text="复制本地地址"))
 
     def _stop_service(self):
         self.log("正在停止服务...")
@@ -462,9 +469,11 @@ class AgentGUI:
         if running:
             self.start_btn.configure(text="停止服务", style='Stop.TButton', state="normal")
             self.status_label.configure(text="运行中", fg=COLORS['success'])
+            self.copy_url_btn.configure(text="复制本地地址", state="normal")
         else:
             self.start_btn.configure(text="启动服务", style='Accent.TButton', state="normal")
             self.status_label.configure(text="未运行", fg=COLORS['text_light'])
+            self.copy_url_btn.configure(text="复制访问地址", state="disabled")
 
     def _copy_url(self):
         if not self.is_running or not self.access_token:
@@ -474,12 +483,14 @@ class AgentGUI:
         # 优先使用远程地址
         if self.frp_client and self.frp_client.public_url:
             url = f"{self.frp_client.public_url}?token={self.access_token}"
+            url_type = "远程"
         else:
             url = f"http://localhost:{self.config.local_port}?token={self.access_token}"
+            url_type = "本地"
 
         self.root.clipboard_clear()
         self.root.clipboard_append(url)
-        self.log(f"地址已复制: {url}")
+        self.log(f"{url_type}地址已复制: {url}")
 
     def _clear_log(self):
         self.log_text.configure(state=tk.NORMAL)
