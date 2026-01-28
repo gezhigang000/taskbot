@@ -332,13 +332,37 @@ customDomains = ["{self._subdomain}.{self.server_addr}"]
     def stop(self):
         """停止 FRP 客户端"""
         if self.process:
+            logger.info("正在停止 frpc...")
             try:
+                # 先尝试优雅关闭
                 self.process.send_signal(signal.SIGTERM)
                 self.process.wait(timeout=5)
-            except (subprocess.TimeoutExpired, OSError):
+            except subprocess.TimeoutExpired:
+                logger.warning("frpc 未能在5秒内退出，强制终止")
                 self.process.kill()
-            self.process = None
+                self.process.wait(timeout=2)
+            except OSError as e:
+                logger.warning(f"停止 frpc 时出错: {e}")
+            finally:
+                # 关闭 stdout 管道
+                if self.process.stdout:
+                    try:
+                        self.process.stdout.close()
+                    except Exception:
+                        pass
+                self.process = None
             logger.info("frpc 已停止")
+
+        # 清理配置文件
+        if self._config_path:
+            try:
+                import os
+                if os.path.exists(self._config_path):
+                    os.remove(self._config_path)
+                    logger.debug(f"已删除配置文件: {self._config_path}")
+            except Exception as e:
+                logger.debug(f"删除配置文件失败: {e}")
+            self._config_path = None
 
     def is_running(self) -> bool:
         """检查 FRP 是否在运行"""

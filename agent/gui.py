@@ -503,22 +503,47 @@ class AgentGUI:
     def _stop_service(self):
         self.log("正在停止服务...")
 
-        # 停止 FRP
+        # 1. 停止 FRP 隧道
         if self.frp_client:
+            self.log("停止 FRP 隧道...")
             try:
                 self.frp_client.stop()
-            except Exception:
-                pass
+            except Exception as e:
+                self.log(f"FRP 停止异常: {e}", "warning")
             self.frp_client = None
 
-        # 停止 uvicorn
+        # 2. 停止 uvicorn 服务器
         if self.uvicorn_server:
+            self.log("停止 HTTP 服务器...")
             self.uvicorn_server.should_exit = True
             self.uvicorn_server = None
 
+        # 3. 停止事件循环（如果还在运行）
+        if self.loop and self.loop.is_running():
+            self.log("停止事件循环...")
+            self.loop.call_soon_threadsafe(self.loop.stop)
+
+        # 4. 等待服务器线程结束
+        if self.server_thread and self.server_thread.is_alive():
+            self.log("等待服务器线程结束...")
+            self.server_thread.join(timeout=5)
+            if self.server_thread.is_alive():
+                self.log("服务器线程未能在5秒内结束", "warning")
+
+        # 5. 关闭事件循环
+        if self.loop:
+            try:
+                if not self.loop.is_closed():
+                    self.loop.close()
+            except Exception:
+                pass
+            self.loop = None
+
+        # 6. 清理状态
+        self.server_thread = None
         self.is_running = False
         self._update_ui_running(False)
-        self.log("服务已停止")
+        self.log("服务已完全停止")
 
     def _update_ui_running(self, running: bool):
         if running:

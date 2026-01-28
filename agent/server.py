@@ -136,21 +136,57 @@ class ClaudeProcess:
 
     def stop(self):
         """停止 Claude 进程"""
+        logger.info("正在停止 Claude 进程...")
+
+        # 1. 取消读取任务
         if self._reader_task:
             self._reader_task.cancel()
+            self._reader_task = None
+
+        # 2. 关闭 PTY 主端
         if self.master_fd is not None:
             try:
                 os.close(self.master_fd)
-            except OSError:
-                pass
+                logger.debug("已关闭 PTY 主端")
+            except OSError as e:
+                logger.debug(f"关闭 PTY 主端失败: {e}")
             self.master_fd = None
+
+        # 3. 终止 Claude 子进程
         if self.pid:
             try:
+                # 先尝试优雅终止
                 os.kill(self.pid, signal.SIGTERM)
-                os.waitpid(self.pid, 0)
-            except (OSError, ChildProcessError):
-                pass
+                # 等待进程退出
+                pid, status = os.waitpid(self.pid, os.WNOHANG)
+                if pid == 0:
+                    # 进程还在运行，等待一会
+                    import time
+                    for _ in range(10):  # 最多等待1秒
+                        time.sleep(0.1)
+                        pid, status = os.waitpid(self.pid, os.WNOHANG)
+                        if pid != 0:
+                            break
+                    if pid == 0:
+                        # 强制终止
+                        logger.warning("Claude 进程未能在1秒内退出，强制终止")
+                        os.kill(self.pid, signal.SIGKILL)
+                        os.waitpid(self.pid, 0)
+            except (OSError, ChildProcessError) as e:
+                logger.debug(f"终止 Claude 进程时出错: {e}")
             self.pid = None
+
+        # 4. 清空输出队列
+        queue_count = 0
+        while not self.output_queue.empty():
+            try:
+                self.output_queue.get_nowait()
+                queue_count += 1
+            except:
+                break
+        if queue_count > 0:
+            logger.debug(f"已清空输出队列 ({queue_count} 条)")
+
         logger.info("Claude 进程已停止")
 
 
@@ -169,8 +205,9 @@ def create_app(
     token = access_token or secrets.token_urlsafe(16)
     claude: Optional[ClaudeProcess] = None
     
-    # 连接计数
+    # 连接计数和活跃 SSE 任务追踪
     connection_count = {"sse": 0, "total": 0}
+    active_sse_tasks: set = set()  # 追踪活跃的 SSE 生成器任务
 
     # 加载终端 HTML
     html_path = Path(__file__).parent / "terminal.html"
@@ -215,8 +252,29 @@ def create_app(
 
     @app.on_event("shutdown")
     async def shutdown():
+        logger.info("正在关闭服务...")
+
+        # 1. 取消所有活跃的 SSE 连接
+        if active_sse_tasks:
+            logger.info(f"取消 {len(active_sse_tasks)} 个活跃 SSE 连接")
+            for task in list(active_sse_tasks):
+                task.cancel()
+            # 等待所有任务完成取消
+            await asyncio.gather(*active_sse_tasks, return_exceptions=True)
+            active_sse_tasks.clear()
+
+        # 2. 停止 Claude 进程
         if claude:
+            logger.info("停止 Claude 进程...")
             claude.stop()
+            # 清空输出队列
+            while not claude.output_queue.empty():
+                try:
+                    claude.output_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+
+        logger.info("服务已关闭")
 
     # --- 路由 ---
     @app.get("/", response_class=HTMLResponse)
@@ -233,7 +291,12 @@ def create_app(
         connection_count["sse"] += 1
         conn_id = connection_count["sse"]
         logger.info(f"[SSE #{conn_id}] 连接建立 - 来源: {client}")
-        
+
+        # 用于追踪当前连接
+        current_task = asyncio.current_task()
+        if current_task:
+            active_sse_tasks.add(current_task)
+
         async def generate():
             try:
                 while True:
@@ -246,11 +309,14 @@ def create_app(
                         # 心跳保持连接
                         yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
             except asyncio.CancelledError:
-                logger.info(f"[SSE #{conn_id}] 连接断开 - 来源: {client}")
+                logger.info(f"[SSE #{conn_id}] 连接被取消 - 来源: {client}")
                 raise
             except Exception as e:
                 logger.info(f"[SSE #{conn_id}] 连接异常断开 - 来源: {client}, 原因: {e}")
             finally:
+                # 从活跃连接中移除
+                if current_task and current_task in active_sse_tasks:
+                    active_sse_tasks.discard(current_task)
                 logger.info(f"[SSE #{conn_id}] 连接关闭 - 来源: {client}")
 
         return StreamingResponse(
