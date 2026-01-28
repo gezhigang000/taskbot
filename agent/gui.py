@@ -512,25 +512,26 @@ class AgentGUI:
                 self.log(f"FRP 停止异常: {e}", "warning")
             self.frp_client = None
 
-        # 2. 停止 uvicorn 服务器
+        # 2. 信号 uvicorn 停止（不要立即停止事件循环，让它有机会优雅关闭）
         if self.uvicorn_server:
             self.log("停止 HTTP 服务器...")
             self.uvicorn_server.should_exit = True
-            self.uvicorn_server = None
+            # 注意：不要在这里设置 self.uvicorn_server = None，让线程自然结束
 
-        # 3. 停止事件循环（如果还在运行）
-        if self.loop and self.loop.is_running():
-            self.log("停止事件循环...")
-            self.loop.call_soon_threadsafe(self.loop.stop)
-
-        # 4. 等待服务器线程结束
+        # 3. 等待服务器线程自然结束（uvicorn 会处理 shutdown 事件）
         if self.server_thread and self.server_thread.is_alive():
-            self.log("等待服务器线程结束...")
+            self.log("等待服务器关闭...")
             self.server_thread.join(timeout=5)
+            
+            # 如果5秒后还没结束，强制停止事件循环
             if self.server_thread.is_alive():
-                self.log("服务器线程未能在5秒内结束", "warning")
+                self.log("服务器未能在5秒内关闭，强制停止...", "warning")
+                if self.loop and self.loop.is_running():
+                    self.loop.call_soon_threadsafe(self.loop.stop)
+                # 再等待一下
+                self.server_thread.join(timeout=2)
 
-        # 5. 关闭事件循环
+        # 4. 清理事件循环
         if self.loop:
             try:
                 if not self.loop.is_closed():
@@ -539,7 +540,8 @@ class AgentGUI:
                 pass
             self.loop = None
 
-        # 6. 清理状态
+        # 5. 清理状态
+        self.uvicorn_server = None
         self.server_thread = None
         self.is_running = False
         self._update_ui_running(False)

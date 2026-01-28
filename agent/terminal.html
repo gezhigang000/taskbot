@@ -231,11 +231,35 @@
         let sendTimer = null;
         let isConnected = false;
 
+        // 本地回显：对于可打印字符，立即在终端显示
+        // 这是因为 Claude Code 使用 raw 模式，不会自动回显输入
+        function localEcho(data) {
+            // 只回显可打印字符，不回显控制字符
+            for (let i = 0; i < data.length; i++) {
+                const code = data.charCodeAt(i);
+                // 可打印 ASCII (32-126) 或 UTF-8 多字节字符 (>127)
+                if (code >= 32 && code !== 127) {
+                    term.write(data[i]);
+                } else if (data[i] === '\r' || data[i] === '\n') {
+                    // 回车换行
+                    term.write('\r\n');
+                } else if (data[i] === '\x7f' || data[i] === '\b') {
+                    // 退格键：删除一个字符
+                    term.write('\b \b');
+                }
+                // 其他控制字符（如方向键、Ctrl+C）不本地回显
+            }
+        }
+
         term.onData(data => {
             if (!isConnected) {
                 console.warn('Not connected, input ignored');
                 return;
             }
+
+            // 本地回显
+            localEcho(data);
+
             // 合并快速输入（粘贴场景）
             inputBuffer += data;
             if (!sendTimer) {
