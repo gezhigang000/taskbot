@@ -194,10 +194,18 @@ class FRPClient:
     @property
     def public_url(self) -> str:
         """获取公网访问地址"""
-        return f"http://{self.agent_id}.{self.server_addr}"
+        subdomain = getattr(self, '_subdomain', self.agent_id)
+        return f"http://{subdomain}.{self.server_addr}"
 
     def _write_config(self) -> str:
         """生成 frpc 配置文件"""
+        # 使用时间戳确保代理名称和子域名唯一，避免 "proxy already exists" 和 "router config conflict" 错误
+        import time
+        proxy_suffix = hex(int(time.time()) & 0xFFFF)[2:]  # 取时间戳后4位十六进制
+        proxy_name = f"claude-{self.agent_id}-{proxy_suffix}"
+        # 子域名也需要唯一，否则会出现 router config conflict
+        self._subdomain = f"{self.agent_id}-{proxy_suffix}"
+        
         config = f"""serverAddr = "{self.server_addr}"
 serverPort = {self.server_port}
 """
@@ -209,10 +217,10 @@ auth.token = "{self.auth_token}"
 
         config += f"""
 [[proxies]]
-name = "claude-{self.agent_id}"
+name = "{proxy_name}"
 type = "http"
 localPort = {self.local_port}
-customDomains = ["{self.agent_id}.{self.server_addr}"]
+customDomains = ["{self._subdomain}.{self.server_addr}"]
 """
 
         config_dir = get_frp_dir()
@@ -220,6 +228,8 @@ customDomains = ["{self.agent_id}.{self.server_addr}"]
         config_path.write_text(config, encoding="utf-8")
         self._config_path = str(config_path)
         logger.info(f"FRP 配置: {config_path}")
+        logger.info(f"代理名称: {proxy_name}")
+        logger.info(f"子域名: {self._subdomain}.{self.server_addr}")
         return self._config_path
 
     def start(self, frpc_path: Optional[str] = None, timeout: float = 10.0) -> bool:
