@@ -58,6 +58,18 @@
             color: #888;
         }
 
+        .input-indicator {
+            font-size: 10px;
+            color: #ffc107;
+            margin-left: 8px;
+            opacity: 0;
+            transition: opacity 0.2s;
+        }
+
+        .input-indicator.show {
+            opacity: 1;
+        }
+
         /* 终端区域 */
         .terminal-container {
             flex: 1;
@@ -154,6 +166,7 @@
         <div class="status-dot" id="statusDot"></div>
         <span class="header-title">Claude Code</span>
         <span class="header-info" id="headerInfo">Connecting...</span>
+        <span class="input-indicator" id="inputIndicator">输入中...</span>
     </div>
 
     <div class="terminal-container">
@@ -243,7 +256,12 @@
             term.focus();
         }
 
+        let inputIndicatorTimer = null;
+
         async function sendInput(data) {
+            // 显示输入指示器
+            showInputIndicator();
+
             try {
                 const response = await fetch('/input?token=' + token, {
                     method: 'POST',
@@ -258,6 +276,21 @@
             } catch (e) {
                 console.error('Input error:', e);
             }
+        }
+
+        function showInputIndicator() {
+            const indicator = document.getElementById('inputIndicator');
+            indicator.classList.add('show');
+
+            // 清除之前的计时器
+            if (inputIndicatorTimer) {
+                clearTimeout(inputIndicatorTimer);
+            }
+
+            // 500ms 后隐藏
+            inputIndicatorTimer = setTimeout(() => {
+                indicator.classList.remove('show');
+            }, 500);
         }
 
         // === SSE 输出 ===
