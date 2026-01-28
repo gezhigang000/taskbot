@@ -252,7 +252,7 @@ class AgentGUI:
     def _show_settings(self):
         win = tk.Toplevel(self.root)
         win.title("设置")
-        win.geometry("500x480")
+        win.geometry("500x500")
         win.configure(bg=COLORS['bg'])
         win.transient(self.root)
         win.grab_set()
@@ -266,21 +266,21 @@ class AgentGUI:
 
         def add_field(row, label, key, hint=""):
             ttk.Label(frame, text=label, font=('', 10, 'bold')).grid(
-                row=row, column=0, sticky=tk.W, pady=(0, 2))
+                row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 2))
 
             var = tk.StringVar(value=str(getattr(self.config, key)))
             self._setting_vars[key] = var  # 保存引用防止 GC
 
-            entry = tk.Entry(frame, textvariable=var, width=50, font=('', 10),
+            entry = tk.Entry(frame, textvariable=var, font=('', 10),
                            bg=COLORS['bg_light'], fg=COLORS['text'],
                            relief='solid', bd=1)
-            entry.grid(row=row + 1, column=0, sticky=tk.EW, pady=(0, 2))
+            entry.grid(row=row + 1, column=0, columnspan=2, sticky=tk.EW, pady=(0, 2))
             entries[key] = entry
 
             if hint:
                 tk.Label(frame, text=hint, font=('', 8),
                          fg=COLORS['text_light'], bg=COLORS['bg']).grid(
-                    row=row + 2, column=0, sticky=tk.W, pady=(0, 8))
+                    row=row + 2, column=0, columnspan=2, sticky=tk.W, pady=(0, 8))
             return row + 3
 
         row = 0
@@ -292,8 +292,63 @@ class AgentGUI:
                         "服务器认证令牌（从服务端获取）")
         row = add_field(row, "本地端口:", "local_port",
                         "本地 HTTP 服务端口，默认 8080")
-        row = add_field(row, "Claude CLI 路径:", "claude_path",
-                        "留空自动检测")
+
+        # Claude CLI 路径 - 带检测按钮
+        ttk.Label(frame, text="Claude CLI 路径:", font=('', 10, 'bold')).grid(
+            row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 2))
+        row += 1
+
+        var = tk.StringVar(value=str(self.config.claude_path))
+        self._setting_vars["claude_path"] = var
+
+        claude_frame = ttk.Frame(frame)
+        claude_frame.grid(row=row, column=0, columnspan=2, sticky=tk.EW, pady=(0, 2))
+        
+        entry = tk.Entry(claude_frame, textvariable=var, font=('', 10),
+                       bg=COLORS['bg_light'], fg=COLORS['text'],
+                       relief='solid', bd=1)
+        entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        entries["claude_path"] = entry
+
+        def detect_claude():
+            """检测 Claude CLI 路径"""
+            import shutil
+            from pathlib import Path
+            
+            paths_to_check = [
+                Path.home() / ".local" / "bin" / "claude",
+                Path("/usr/local/bin/claude"),
+                Path("/opt/homebrew/bin/claude"),
+                Path.home() / ".npm-global" / "bin" / "claude",
+            ]
+            
+            # 先检查 PATH
+            found = shutil.which("claude")
+            if found:
+                var.set(found)
+                messagebox.showinfo("检测成功", f"已找到 Claude CLI:\n{found}")
+                return
+            
+            # 检查常见路径
+            for p in paths_to_check:
+                if p.exists() and os.access(p, os.X_OK):
+                    var.set(str(p))
+                    messagebox.showinfo("检测成功", f"已找到 Claude CLI:\n{p}")
+                    return
+            
+            messagebox.showwarning("未找到", 
+                "未找到 Claude CLI。\n\n"
+                "请先安装:\nnpm install -g @anthropic-ai/claude-code\n\n"
+                "或手动输入路径。")
+
+        ttk.Button(claude_frame, text="检测", command=detect_claude,
+                   style='Small.TButton').pack(side=tk.LEFT, padx=(5, 0))
+        row += 1
+
+        tk.Label(frame, text="留空自动检测，或点击检测按钮查找", font=('', 8),
+                 fg=COLORS['text_light'], bg=COLORS['bg']).grid(
+            row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 8))
+        row += 1
 
         def save():
             try:
@@ -309,7 +364,7 @@ class AgentGUI:
                 messagebox.showerror("错误", f"端口必须是数字: {e}")
 
         btn_frame = ttk.Frame(frame)
-        btn_frame.grid(row=row, column=0, pady=(10, 0))
+        btn_frame.grid(row=row, column=0, columnspan=2, pady=(10, 0))
         ttk.Button(btn_frame, text="保存", command=save,
                    style='Accent.TButton').pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="取消", command=win.destroy,
