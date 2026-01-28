@@ -168,6 +168,9 @@ def create_app(
     app = FastAPI(title="Claude Code Remote", docs_url=None, redoc_url=None)
     token = access_token or secrets.token_urlsafe(16)
     claude: Optional[ClaudeProcess] = None
+    
+    # 连接计数
+    connection_count = {"sse": 0, "total": 0}
 
     # 加载终端 HTML
     html_path = Path(__file__).parent / "terminal.html"
@@ -188,6 +191,7 @@ def create_app(
             or request.cookies.get("access_token")
         )
         if req_token != token:
+            logger.warning(f"认证失败: {request.url.path} from {request.client.host if request.client else 'unknown'}")
             return Response("Unauthorized", status_code=401)
 
         response = await call_next(request)
@@ -216,30 +220,46 @@ def create_app(
 
     # --- 路由 ---
     @app.get("/", response_class=HTMLResponse)
-    async def index():
+    async def index(request: Request):
+        connection_count["total"] += 1
+        client = request.client.host if request.client else "unknown"
+        logger.info(f"[访问] 终端页面 - 来源: {client} (累计访问: {connection_count['total']})")
         return terminal_html
 
     @app.get("/sse")
-    async def sse_stream():
+    async def sse_stream(request: Request):
         """SSE 输出流"""
+        client = request.client.host if request.client else "unknown"
+        connection_count["sse"] += 1
+        conn_id = connection_count["sse"]
+        logger.info(f"[SSE #{conn_id}] 连接建立 - 来源: {client}")
+        
         async def generate():
-            while True:
-                try:
-                    output = await asyncio.wait_for(
-                        claude.output_queue.get(), timeout=30
-                    )
-                    yield f"data: {json.dumps({'type': 'output', 'data': output})}\n\n"
-                except asyncio.TimeoutError:
-                    # 心跳保持连接
-                    yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
-                except Exception:
-                    break
+            try:
+                while True:
+                    try:
+                        output = await asyncio.wait_for(
+                            claude.output_queue.get(), timeout=30
+                        )
+                        yield f"data: {json.dumps({'type': 'output', 'data': output})}\n\n"
+                    except asyncio.TimeoutError:
+                        # 心跳保持连接
+                        yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
+            except asyncio.CancelledError:
+                logger.info(f"[SSE #{conn_id}] 连接断开 - 来源: {client}")
+                raise
+            except Exception as e:
+                logger.info(f"[SSE #{conn_id}] 连接异常断开 - 来源: {client}, 原因: {e}")
+            finally:
+                logger.info(f"[SSE #{conn_id}] 连接关闭 - 来源: {client}")
 
         return StreamingResponse(
             generate(),
             media_type="text/event-stream",
             headers={
-                "Cache-Control": "no-cache",
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Pragma": "no-cache",
+                "Expires": "0",
                 "Connection": "keep-alive",
                 "X-Accel-Buffering": "no",  # Nginx 禁用缓冲
             },
@@ -251,6 +271,29 @@ def create_app(
         body = await request.json()
         data = body.get("data", "")
         if data and claude:
+            # 日志记录输入（敏感信息用星号替代）
+            display_data = data
+            if len(data) > 20:
+                display_data = data[:10] + "..." + f"({len(data)}字符)"
+            elif data in ['\r', '\n', '\r\n']:
+                display_data = "[Enter]"
+            elif data == '\t':
+                display_data = "[Tab]"
+            elif data == '\x03':
+                display_data = "[Ctrl+C]"
+            elif data == '\x04':
+                display_data = "[Ctrl+D]"
+            elif data == '\x1a':
+                display_data = "[Ctrl+Z]"
+            elif data == '\x1b':
+                display_data = "[Esc]"
+            elif data.startswith('\x1b['):
+                display_data = f"[方向键]"
+            elif not data.isprintable():
+                display_data = f"[控制符 0x{ord(data[0]):02x}]"
+            
+            client = request.client.host if request.client else "unknown"
+            logger.debug(f"[输入] {display_data} - 来源: {client}")
             claude.write_input(data)
         return {"status": "ok"}
 
@@ -261,6 +304,8 @@ def create_app(
         rows = body.get("rows", 40)
         cols = body.get("cols", 120)
         if claude:
+            client = request.client.host if request.client else "unknown"
+            logger.debug(f"[调整] 终端尺寸 {cols}x{rows} - 来源: {client}")
             claude.resize(rows, cols)
         return {"status": "ok"}
 
@@ -270,6 +315,7 @@ def create_app(
         return {
             "status": "healthy",
             "claude_running": claude is not None and claude.pid is not None,
+            "sse_connections": connection_count["sse"],
         }
 
     # 保存 token 供外部使用

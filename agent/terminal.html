@@ -40,6 +40,12 @@
         }
 
         .status-dot.connected { background: #0f9d58; box-shadow: 0 0 6px #0f9d58; }
+        .status-dot.connecting { background: #ffc107; animation: pulse 1s infinite; }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
 
         .header-title {
             font-size: 14px;
@@ -120,6 +126,17 @@
 
         .reconnect-box p { margin-bottom: 12px; }
 
+        .reconnect-box button {
+            background: #0f9d58;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            padding: 10px 20px;
+            font-size: 14px;
+            cursor: pointer;
+            margin-top: 8px;
+        }
+
         .spinner {
             width: 24px; height: 24px;
             border: 3px solid #333;
@@ -159,9 +176,10 @@
 
     <div class="reconnect-overlay" id="reconnectOverlay">
         <div class="reconnect-box">
-            <div class="spinner"></div>
-            <p>连接已断开</p>
+            <div class="spinner" id="reconnectSpinner"></div>
+            <p id="reconnectTitle">连接已断开</p>
             <p id="reconnectMsg">正在重连...</p>
+            <button id="reconnectBtn" style="display:none" onclick="manualReconnect()">手动重连</button>
         </div>
     </div>
 
@@ -198,8 +216,13 @@
         // === 输入处理 ===
         let inputBuffer = '';
         let sendTimer = null;
+        let isConnected = false;
 
         term.onData(data => {
+            if (!isConnected) {
+                console.warn('Not connected, input ignored');
+                return;
+            }
             // 合并快速输入（粘贴场景）
             inputBuffer += data;
             if (!sendTimer) {
@@ -207,22 +230,31 @@
                     sendInput(inputBuffer);
                     inputBuffer = '';
                     sendTimer = null;
-                }, 10);
+                }, 5);  // 减少延迟
             }
         });
 
         function sendKey(key) {
+            if (!isConnected) {
+                showReconnect('未连接', '请等待连接恢复');
+                return;
+            }
             sendInput(key);
             term.focus();
         }
 
         async function sendInput(data) {
             try {
-                await fetch('/input?token=' + token, {
+                const response = await fetch('/input?token=' + token, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ data }),
+                    // 设置较短超时
+                    signal: AbortSignal.timeout(5000),
                 });
+                if (!response.ok) {
+                    console.error('Input failed:', response.status);
+                }
             } catch (e) {
                 console.error('Input error:', e);
             }
@@ -231,59 +263,111 @@
         // === SSE 输出 ===
         let eventSource = null;
         let reconnectAttempts = 0;
-        const maxReconnect = 30;
+        const maxReconnect = 50;
+        let reconnectTimer = null;
 
         function connectSSE() {
             if (eventSource) {
                 eventSource.close();
+                eventSource = null;
             }
 
-            eventSource = new EventSource('/sse?token=' + token);
+            if (reconnectTimer) {
+                clearTimeout(reconnectTimer);
+                reconnectTimer = null;
+            }
 
-            eventSource.onopen = () => {
-                reconnectAttempts = 0;
-                setStatus(true);
-                hideReconnect();
-            };
+            setStatus('connecting');
 
-            eventSource.onmessage = (event) => {
-                try {
-                    const msg = JSON.parse(event.data);
-                    if (msg.type === 'output' && msg.data) {
-                        term.write(msg.data);
+            try {
+                eventSource = new EventSource('/sse?token=' + token);
+
+                eventSource.onopen = () => {
+                    console.log('SSE connected');
+                    reconnectAttempts = 0;
+                    isConnected = true;
+                    setStatus('connected');
+                    hideReconnect();
+                    // 连接成功后立即报告尺寸
+                    setTimeout(reportSize, 100);
+                };
+
+                eventSource.onmessage = (event) => {
+                    try {
+                        const msg = JSON.parse(event.data);
+                        if (msg.type === 'output' && msg.data) {
+                            term.write(msg.data);
+                        }
+                        // heartbeat 不需要处理，但确认连接活着
+                    } catch (e) {
+                        console.error('Parse error:', e);
                     }
-                    // heartbeat 不需要处理
-                } catch (e) {
-                    console.error('Parse error:', e);
-                }
-            };
+                };
 
-            eventSource.onerror = () => {
-                eventSource.close();
-                setStatus(false);
+                eventSource.onerror = (e) => {
+                    console.error('SSE error:', e);
+                    if (eventSource) {
+                        eventSource.close();
+                        eventSource = null;
+                    }
+                    isConnected = false;
+                    setStatus('disconnected');
+                    scheduleReconnect();
+                };
+            } catch (e) {
+                console.error('SSE connect error:', e);
+                isConnected = false;
+                setStatus('disconnected');
+                scheduleReconnect();
+            }
+        }
 
-                if (reconnectAttempts < maxReconnect) {
-                    reconnectAttempts++;
-                    const delay = Math.min(1000 * reconnectAttempts, 10000);
-                    showReconnect(`正在重连... (${reconnectAttempts}/${maxReconnect})`);
-                    setTimeout(connectSSE, delay);
-                } else {
-                    showReconnect('连接失败，请刷新页面');
-                }
-            };
+        function scheduleReconnect() {
+            if (reconnectAttempts >= maxReconnect) {
+                showReconnect('连接失败', '请检查网络后手动重连', true);
+                return;
+            }
+
+            reconnectAttempts++;
+            // 快速重连：前5次每500ms，之后指数退避，最大5秒
+            const delay = reconnectAttempts <= 5
+                ? 500
+                : Math.min(500 * Math.pow(1.5, reconnectAttempts - 5), 5000);
+
+            showReconnect('连接已断开', `正在重连... (${reconnectAttempts}/${maxReconnect})`);
+
+            reconnectTimer = setTimeout(connectSSE, delay);
+        }
+
+        function manualReconnect() {
+            reconnectAttempts = 0;
+            hideReconnect();
+            connectSSE();
         }
 
         // === UI 辅助 ===
-        function setStatus(connected) {
-            document.getElementById('statusDot').className =
-                'status-dot' + (connected ? ' connected' : '');
-            document.getElementById('headerInfo').textContent =
-                connected ? 'Connected' : 'Disconnected';
+        function setStatus(status) {
+            const dot = document.getElementById('statusDot');
+            const info = document.getElementById('headerInfo');
+
+            dot.className = 'status-dot';
+            if (status === 'connected') {
+                dot.classList.add('connected');
+                info.textContent = 'Connected';
+            } else if (status === 'connecting') {
+                dot.classList.add('connecting');
+                info.textContent = 'Connecting...';
+            } else {
+                info.textContent = 'Disconnected';
+            }
         }
 
-        function showReconnect(msg) {
+        function showReconnect(title, msg, showButton = false) {
             document.getElementById('reconnectOverlay').className = 'reconnect-overlay show';
+            document.getElementById('reconnectTitle').textContent = title;
             document.getElementById('reconnectMsg').textContent = msg;
+            document.getElementById('reconnectSpinner').style.display = showButton ? 'none' : 'block';
+            document.getElementById('reconnectBtn').style.display = showButton ? 'block' : 'none';
         }
 
         function hideReconnect() {
@@ -292,6 +376,7 @@
 
         // 终端尺寸调整
         function reportSize() {
+            if (!isConnected) return;
             fetch('/resize?token=' + token, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -304,9 +389,31 @@
             reportSize();
         });
 
+        // 页面可见性变化时检查连接
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible') {
+                console.log('Page visible, checking connection...');
+                // 页面重新可见时，如果未连接则立即重连
+                if (!isConnected || !eventSource || eventSource.readyState !== EventSource.OPEN) {
+                    console.log('Connection lost, reconnecting...');
+                    reconnectAttempts = 0;  // 重置重连计数
+                    connectSSE();
+                }
+            }
+        });
+
+        // 定期检查连接状态
+        setInterval(() => {
+            if (eventSource && eventSource.readyState === EventSource.CLOSED) {
+                console.log('SSE closed, reconnecting...');
+                isConnected = false;
+                setStatus('disconnected');
+                scheduleReconnect();
+            }
+        }, 5000);
+
         // 启动
         connectSSE();
-        setTimeout(reportSize, 500);
         term.focus();
     </script>
 </body>
